@@ -43,6 +43,19 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/helpers"
           cp .github/workflows/scripts/make-nightly-yml.mjs "$RUNNER_TEMP/helpers/"
+          cp .github/workflows/scripts/make-black-whale-icon.mjs "$RUNNER_TEMP/helpers/"
+
+      - name: Convert icons to black whale on transparent
+        if: env.SKIP_BUILD != 'true'
+        shell: bash
+        run: |
+          # Pure Node (zlib only), runs before dependency install. In-place: the same
+          # file feeds electron-builder's win icon (.ico for exe/installer) and the
+          # packaged resources/icon.png.
+          node "$RUNNER_TEMP/helpers/make-black-whale-icon.mjs" \
+            apps/desktop/resources/icon-windows.png apps/desktop/resources/icon-windows.png \
+            apps/desktop/resources/icon.png apps/desktop/resources/icon.png \
+            apps/desktop/resources/icon-macos.png apps/desktop/resources/icon-macos.png
 
       - name: Fetch upstream master and read version
         shell: bash
@@ -135,7 +148,7 @@ jobs:
           done
           exit 1
 
-      - name: Verify baked update feed
+      - name: Verify baked update feed and icon
         if: env.SKIP_BUILD != 'true'
         shell: bash
         run: |
@@ -143,6 +156,10 @@ jobs:
           test -f "$YML" || { echo "app-update.yml was NOT baked into resources/" ; exit 1 ; }
           echo "=== baked resources/app-update.yml ==="
           cat "$YML"
+          node "$RUNNER_TEMP/helpers/make-black-whale-icon.mjs" --verify \
+            "apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/resources/icon.png"
+          test -f "apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/.icon-ico/icon.ico" \
+            || { echo "installer icon.ico missing" ; exit 1 ; }
 
       - name: Generate electron-updater feed metadata (nightly.yml)
         if: env.SKIP_BUILD != 'true'
