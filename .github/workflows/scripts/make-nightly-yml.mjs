@@ -16,7 +16,7 @@ if (!installerPath || !installerUrl || !outputPath) {
 }
 
 const bytes = readFileSync(installerPath)
-const sha512 = bytes.toString('base64')
+const sha512 = createHash('sha512').update(bytes).digest('base64')
 const version = String(installerPath.match(/deepseek-harness-(.+)-win-x64\.exe$/)?.[1] ?? '')
 if (!/^\d+\.\d+\.\d+/.test(version)) {
   console.error(`cannot parse version from ${installerPath}`)
