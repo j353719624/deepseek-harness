@@ -106,6 +106,12 @@ jobs:
         run: |
           cp .env.windows.example .env.windows
           sed -i 's|^DOWNLOAD_TEST_ORIGIN=$|DOWNLOAD_TEST_ORIGIN=https://dsh-updates.invalid|' .env.windows
+          # Point the mandatory-update policy at an unresolvable .invalid host: DeepSeek's
+          # template origins (harness-test.deepseek.com) answer 401 feishu-auth-required,
+          # which blocks the app behind an authentication modal no external user can pass.
+          # An unreachable origin degrades to a non-blocking "unavailable" policy state.
+          sed -i 's|^DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=.*|DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://dsh-updates.invalid|' .env.windows
+          sed -i 's|^DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=.*|DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://dsh-updates.invalid|' .env.windows
 
       - name: Bake self-update feed into the build
         if: env.SKIP_BUILD != 'true'
