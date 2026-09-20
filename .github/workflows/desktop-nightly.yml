@@ -105,14 +105,18 @@ jobs:
           # the updater disabled. A non-null `publish` makes electron-builder bake the
           # feed into the installer; with no publisherName, electron-updater verifies
           # only the feed's sha512 — so installed apps update straight from this fork.
-          cat > electron-builder.config.mjs <<'EOF'
+          # (Unquoted heredoc bakes the URL literally: electron-builder runs in a later
+          # step whose env does not include DSH_DESKTOP_UPDATE_FEED.)
+          cat > electron-builder.config.mjs <<EOF
           import { createElectronBuilderConfig } from './scripts/electron-builder-config.mjs'
 
           const config = createElectronBuilderConfig()
-          config.publish = [{ provider: 'generic', url: process.env.DSH_DESKTOP_UPDATE_FEED, channel: 'nightly' }]
+          config.publish = [{ provider: 'generic', url: '$DSH_DESKTOP_UPDATE_FEED', channel: 'nightly' }]
           export { createElectronBuilderConfig }
           export default config
           EOF
+          echo "=== wrapper electron-builder.config.mjs ==="
+          cat electron-builder.config.mjs
 
       - name: Build and package (retry; runtime asset downloads are transient-flaky and cached)
         if: env.SKIP_BUILD != 'true'
