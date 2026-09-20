@@ -94,6 +94,26 @@ jobs:
           cp .env.windows.example .env.windows
           sed -i 's|^DOWNLOAD_TEST_ORIGIN=$|DOWNLOAD_TEST_ORIGIN=https://dsh-updates.invalid|' .env.windows
 
+      - name: Bake self-update feed into the build
+        if: env.SKIP_BUILD != 'true'
+        shell: bash
+        working-directory: apps/desktop
+        env:
+          DSH_DESKTOP_UPDATE_FEED: https://github.com/${{ github.repository }}/releases/latest/download
+        run: |
+          # Unsigned builds normally ship without resources/app-update.yml, which keeps
+          # the updater disabled. A non-null `publish` makes electron-builder bake the
+          # feed into the installer; with no publisherName, electron-updater verifies
+          # only the feed's sha512 — so installed apps update straight from this fork.
+          cat > electron-builder.config.mjs <<'EOF'
+          import { createElectronBuilderConfig } from './scripts/electron-builder-config.mjs'
+
+          const config = createElectronBuilderConfig()
+          config.publish = [{ provider: 'generic', url: process.env.DSH_DESKTOP_UPDATE_FEED, channel: 'nightly' }]
+          export { createElectronBuilderConfig }
+          export default config
+          EOF
+
       - name: Build and package (retry; runtime asset downloads are transient-flaky and cached)
         if: env.SKIP_BUILD != 'true'
         shell: bash
@@ -110,6 +130,15 @@ jobs:
             sleep 30
           done
           exit 1
+
+      - name: Verify baked update feed
+        if: env.SKIP_BUILD != 'true'
+        shell: bash
+        run: |
+          YML="apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/win-unpacked/resources/app-update.yml"
+          test -f "$YML" || { echo "app-update.yml was NOT baked into resources/" ; exit 1 ; }
+          echo "=== baked resources/app-update.yml ==="
+          cat "$YML"
 
       - name: Generate electron-updater feed metadata (nightly.yml)
         if: env.SKIP_BUILD != 'true'
