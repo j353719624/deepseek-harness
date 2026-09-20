@@ -68,9 +68,9 @@ jobs:
         if: env.SKIP_BUILD != 'true'
         shell: bash
         run: |
-          git checkout --orphan upstream-build
-          git rm -rf --quiet . 2>/dev/null || true
-          git checkout "$UPSTREAM_SHA" -- .
+          # Detach HEAD at the upstream commit so the tree (and `git rev-parse HEAD`,
+          # which the build bakes into records) reflect real upstream state.
+          git checkout --detach "$UPSTREAM_SHA"
 
       - name: Use Node 24
         if: env.SKIP_BUILD != 'true'
