@@ -44,6 +44,18 @@ jobs:
           mkdir -p "$RUNNER_TEMP/helpers"
           cp .github/workflows/scripts/make-nightly-yml.mjs "$RUNNER_TEMP/helpers/"
           cp .github/workflows/scripts/make-black-whale-icon.mjs "$RUNNER_TEMP/helpers/"
+          cp .github/workflows/scripts/patch-shell-serving.mjs "$RUNNER_TEMP/helpers/"
+
+      - name: Patch shell dialog serving (upstream alpha bug)
+        if: env.SKIP_BUILD != 'true'
+        shell: bash
+        run: |
+          # 0.1.6-alpha.2's protocol handler 404s dsh-app://shell/*, so every shell
+          # dialog (check-updates, install confirm, policy login) loads an empty page:
+          # the app hangs behind an invisible modal with a blurred main window. Insert
+          # the missing `shell` hostname branch; the script fails loudly if the
+          # upstream anchor changes.
+          node "$RUNNER_TEMP/helpers/patch-shell-serving.mjs" apps/desktop/src/main.ts
 
       - name: Convert icons to black whale on transparent
         if: env.SKIP_BUILD != 'true'
