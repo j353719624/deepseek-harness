@@ -47,6 +47,18 @@ jobs:
           cp .github/workflows/scripts/patch-shell-serving.mjs "$RUNNER_TEMP/helpers/"
           cp .github/workflows/scripts/patch-conversation-width.mjs "$RUNNER_TEMP/helpers/"
           cp .github/workflows/scripts/patch-pi-ai-default-context.mjs "$RUNNER_TEMP/helpers/"
+          cp .github/workflows/scripts/patch-profile-health.mjs "$RUNNER_TEMP/helpers/"
+
+      - name: Add boot-time profile health check
+        if: env.SKIP_BUILD != 'true'
+        shell: bash
+        run: |
+          # The runtime reuses a profile whose node_modules merely EXISTS, so a
+          # profile with dangling bundle symlinks (left behind by older installs)
+          # boots with zero plugins and silently blocks session creation. Insert
+          # a boot-time check that quarantines such profiles so they rebuild.
+          node "$RUNNER_TEMP/helpers/patch-profile-health.mjs" apps/desktop/src/main.ts
+          cp .github/workflows/scripts/patch-pi-ai-default-context.mjs "$RUNNER_TEMP/helpers/"
 
       - name: Raise pi-ai fallback context window to 1M
         if: env.SKIP_BUILD != 'true'
