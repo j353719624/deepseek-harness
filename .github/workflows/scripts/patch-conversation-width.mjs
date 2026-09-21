@@ -29,20 +29,32 @@ const RESOLVE_ANCHOR = [
   '  return Math.max(680, Math.min(columnWidth * 0.64, 920))',
   '}',
 ].join('\n')
-const RESOLVE_PATCH = [
+const RESOLVE_PATCH_V1 = [
   'function resolveContentWidth(columnWidth: number, preference: number | null): number {',
   '  void preference',
   '  return Math.max(CONTENT_MIN, columnWidth - CONTENT_EDGE_BUDGET)',
   '}',
 ].join('\n')
+const RESOLVE_PATCH_V2 = [
+  'function resolveContentWidth(columnWidth: number, preference: number | null): number {',
+  '  void preference',
+  '  void CONTENT_MIN',
+  '  void CONTENT_EDGE_BUDGET',
+  '  return columnWidth',
+  '}',
+].join('\n')
 
 let ts = readFileSync(tsPath, 'utf8')
-if (ts.includes(RESOLVE_ANCHOR)) {
-  ts = ts.replace(RESOLVE_ANCHOR, RESOLVE_PATCH)
+if (ts.includes(RESOLVE_PATCH_V2)) {
+  console.log(`${tsPath}: already patched (v2, full-bleed width)`)
+} else if (ts.includes(RESOLVE_ANCHOR)) {
+  ts = ts.replace(RESOLVE_ANCHOR, RESOLVE_PATCH_V2)
   writeFileSync(tsPath, ts)
-  console.log(`${tsPath}: content width pinned to maximum`)
-} else if (ts.includes('void preference')) {
-  console.log(`${tsPath}: already patched`)
+  console.log(`${tsPath}: content width pinned to full container width`)
+} else if (ts.includes(RESOLVE_PATCH_V1)) {
+  ts = ts.replace(RESOLVE_PATCH_V1, RESOLVE_PATCH_V2)
+  writeFileSync(tsPath, ts)
+  console.log(`${tsPath}: upgraded v1 (max minus handle budget) to v2 (full container width)`)
 } else {
   console.error(`${tsPath}: anchor not found — upstream changed resolveContentWidth; update this patch`)
   process.exit(1)
