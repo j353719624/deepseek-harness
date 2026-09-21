@@ -46,6 +46,16 @@ jobs:
           cp .github/workflows/scripts/make-black-whale-icon.mjs "$RUNNER_TEMP/helpers/"
           cp .github/workflows/scripts/patch-shell-serving.mjs "$RUNNER_TEMP/helpers/"
           cp .github/workflows/scripts/patch-conversation-width.mjs "$RUNNER_TEMP/helpers/"
+          cp .github/workflows/scripts/patch-pi-ai-default-context.mjs "$RUNNER_TEMP/helpers/"
+
+      - name: Raise pi-ai fallback context window to 1M
+        if: env.SKIP_BUILD != 'true'
+        shell: bash
+        run: |
+          # Undeclared models otherwise fall back to 262,144 tokens. GLM-5.3-Flash
+          # (the model this deployment talks to) nominally serves a 1M window.
+          node "$RUNNER_TEMP/helpers/patch-pi-ai-default-context.mjs" \
+            packages/llm/llm-pi-ai/src/config.ts
 
       - name: Pin conversation width to maximum, drop drag handles
         if: env.SKIP_BUILD != 'true'
