@@ -45,6 +45,17 @@ jobs:
           cp .github/workflows/scripts/make-nightly-yml.mjs "$RUNNER_TEMP/helpers/"
           cp .github/workflows/scripts/make-black-whale-icon.mjs "$RUNNER_TEMP/helpers/"
           cp .github/workflows/scripts/patch-shell-serving.mjs "$RUNNER_TEMP/helpers/"
+          cp .github/workflows/scripts/patch-conversation-width.mjs "$RUNNER_TEMP/helpers/"
+
+      - name: Pin conversation width to maximum, drop drag handles
+        if: env.SKIP_BUILD != 'true'
+        shell: bash
+        run: |
+          # The upstream composer has drag handles on both sides that persist a
+          # narrowed content width. Remove the handles and pin the column to the
+          # layout maximum; the script fails loudly if the upstream anchor changes.
+          node "$RUNNER_TEMP/helpers/patch-conversation-width.mjs" \
+            packages/client/ui-conversation/src/client/skeleton
 
       - name: Patch shell dialog serving (upstream alpha bug)
         if: env.SKIP_BUILD != 'true'
