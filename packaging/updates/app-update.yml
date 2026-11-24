@@ -1,4 +1,3 @@
-provider: github
-owner: j353719624
-repo: deepseek-harness
+provider: generic
+url: https://github.com/j353719624/deepseek-harness/releases/download/nightly
 updaterCacheDirName: dsh-desktop-updater
