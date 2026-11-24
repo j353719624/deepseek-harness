@@ -69,13 +69,13 @@ This section explains the contract in API terms and the design decisions behind 
 The seam is built on one split and three commitments:
 
 - **Abstract contract, concrete backends.** The interface states what condensation does; providers own policy, retention, and summarization so each role evolves and swaps independently.
-- **Session and LLM vocabulary are part of the contract.** The operations act on a `Session` and the summary uses `ContentBlock`, so the Service Definition depends on `dsh-session` and `dsh-llm` despite the general Cordis-only guidance — a deliberate deviation recorded in the [compaction capability-seam Agent Note](../../../.agents/notes/implemented/feature/2026-06-18-compaction-capability-seam.md).
+- **Session and LLM vocabulary are part of the contract.** The operations act on a `Session` and the summary uses `ContentBlock`, so the Service Definition depends on `dsh-session` and `dsh-llm` despite the general Cordis-only guidance — a deliberate deviation recorded in the [historical compaction capability-seam Agent Note](../../../.agents/notes/archived/feature/2026-06-18-compaction-capability-seam.md).
 - **The log-recorded bracket is the lock.** `compaction/start` is appended before summarization yields and `compaction/end` releases; every failure makes exactly one close attempt, and a failed close leaves the unmatched start as the intentional busy signal.
 - **The surface is mutated exactly once.** The summary rides on a `user/message` replacement inside the bracket; all `compaction/*` events stay log-only.
 
 ### Service API
 
-The contract is three abstract operations a backend implements: `compactIfNeeded` for automatic `pressure` or `context-overflow` triggers, `compactNow` for one explicit on-demand reduction, and `compactRegion` for a caller-selected surface range. Reusable request measurement is a separate service, `ctx.tokenMeter`. The exhaustive per-operation semantics live in the [compaction subsystem reference](../../../docs/subsystems/compaction.md); the exact signatures are in [`src/index.ts`](src/index.ts).
+The contract is three abstract operations a backend implements: `compactIfNeeded` for automatic `pressure` or `context-overflow` triggers, `compactNow` for one explicit on-demand reduction, and `compactRegion` for a caller-selected balanced range that excludes the initial system message. Reusable request measurement is a separate service, `ctx.tokenMeter`. The exhaustive per-operation semantics live in the [compaction subsystem reference](../../../docs/subsystems/compaction.md); the exact signatures are in [`src/index.ts`](src/index.ts).
 
 A backend that summarizes through `ctx.llm.stream()` must forward the abort signal into the call's `GenerateOptions.signal`, so an abort or fiber dispose tears down the in-flight summarization. Automatic and explicit-region brackets recover their numeric owner from the open turn; manual brackets require no open turn and stamp `turn: null`.
 
@@ -92,9 +92,9 @@ The Service Definition exports `toolPairingBalancedBefore(session, seq)` and `to
 
 ### The surface contract
 
-`SurfaceEventType` is a closed union — `user/message`, `assistant/message`, and `tool/result` require `surfaceOp`, and other events forbid it, so a `compaction/*` event cannot appear on the surface. A successful backend run instead brackets the operation in the log: it appends `compaction/start` (log-only) to acquire the lock, summarizes the range, appends the log-only `compaction/summary` record, replaces the selected span with one `user/message` carrying the summary — the only surface mutation — and appends `compaction/end` (log-only) to release the lock.
+A successful backend run records `compaction/start`, a log-only `compaction/summary`, the replacement `user/message` checkpoint, and `compaction/end`. The checkpoint replaces only the selected range. The [agent loop](../../core/agent-loop/README.md#understand-the-implementation) rebuilds current system instructions before the next model attempt.
 
-The replacement sits inside the lock bracket, so a crash between `compaction/start` and `compaction/end` leaves a detectable orphaned lock rather than a `compaction/end` that falsely claims success. `deriveMessages()` renders the summary as a user-role message followed by the retained nodes; the shadowed events stay in the raw log, so replay is deterministic. The per-event payloads are enumerated in the [compaction subsystem reference](../../../docs/subsystems/compaction.md).
+The replacement sits inside the lock bracket, so a crash between `compaction/start` and `compaction/end` leaves a detectable orphaned lock rather than a `compaction/end` that falsely claims success. `deriveMessages()` renders the summary as a user-role message at the selected range’s position; the shadowed events stay in the raw log, so replay is deterministic. The per-event payloads are enumerated in the [compaction subsystem reference](../../../docs/subsystems/compaction.md).
 
 ### Source map
 
@@ -105,7 +105,6 @@ The replacement sits inside the lock bracket, so a crash between `compaction/sta
 | [`src/tool-pairing.ts`](src/tool-pairing.ts) | Per-session cut-balance cache behind the two boundary helpers |
 | [`src/checkpoint.ts`](src/checkpoint.ts) | Cordis-free checkpoint source constructor and predicate (`./checkpoint` leaf) |
 | [`src/brand.ts`](src/brand.ts) | `CompactionId` branded identity |
-| [`src/invariant.ts`](src/invariant.ts) | Invariant companion: validates the `compaction/start`→`summary`→`end` bracket, its owner-turn enclosure, and checkpoint correlation |
 
 ### Locking and serialization
 
@@ -129,7 +128,7 @@ Read these pages when the package-level contract is not enough; they move from t
 - [Tool-result pruner](../compaction-tool-result-pruner/README.md) — the optional companion that trims oversized tool outputs first.
 - [Human /compact command](../command-compact/README.md) — the on-demand trigger for condensation.
 - [Token meter](../../llm/token-meter/README.md) — the measurement service that decides when to condense.
-- [Compaction capability-seam Agent Note](../../../.agents/notes/implemented/feature/2026-06-18-compaction-capability-seam.md) — the split and the session/llm dependency rationale.
+- [historical Compaction capability-seam Agent Note](../../../.agents/notes/archived/feature/2026-06-18-compaction-capability-seam.md) — the split and the session/llm dependency rationale.
 
 -----
 
@@ -140,7 +139,7 @@ Read these pages when the package-level contract is not enough; they move from t
 
 #### What the model sees
 
-A successful backend replaces an older surface range with one user-role summary checkpoint — a `user/message` carrying `surfaceOp: { op: 'replace', startSeq, endSeq }`. The raw events stay logged but stop appearing in derived model messages; the seam itself performs no rewrite.
+A successful backend replaces the selected conversation range with one user-role summary checkpoint — a `user/message` carrying `surfaceOp: { op: 'replace', startSeq, endSeq }`. The raw events stay logged but stop appearing in derived model messages; the seam itself performs no rewrite.
 
 #### Token effect
 
@@ -159,7 +158,7 @@ These limits describe what condensation cannot do, regardless of which backend i
 
 - **Human command, not a model tool** — condensation is triggered by the `/compact` command and by automatic pressure; no model-facing compaction tool is registered.
 - **Some single-unit overflow is out of contract** — balanced summary compaction cannot split one indivisible unit. The optional pruning companion can still repair a closed tool pair when text-bearing tool-result bulk is removable; a large non-tool node or a tool unit whose non-prunable remainder is oversized cannot be compacted.
-- **An envelope that alone approaches the window is not surface-compaction work** — compaction shrinks derived history, never the system prompt, tools, or session prefix.
+- **An envelope that alone approaches the window is not surface-compaction work** — condensing conversation history cannot make required system instructions or tool schemas fit a smaller window.
 
 <a id="dev-note"></a>
 ### Dev Note
@@ -171,6 +170,6 @@ This Dev Note is working context for maintainers and is explicitly non-authorita
 
 - **Model-facing tool, undecided** — compaction is human-command only. A model-facing compaction tool remains an open question; it would need its own schema and interaction with the existing command path.
 - **Template and remote backends, undecided** — the `SummaryResult` contract already carries an unmarked `rawOutput` variant for summarizers that do not identify a call through `ctx.llm.stream()`, but no such backend ships.
-- **Range arguments for `/compact`, undecided** — the argument-free form keeps behavior stable across command adapters; explicit ranges stay the programmatic `compactRegion()` path.
+- **Range arguments for `/compact`, undecided** — the argument-free form keeps behavior stable across command adapters; explicit range endpoints stay the programmatic `compactRegion()` path.
 
 </details>

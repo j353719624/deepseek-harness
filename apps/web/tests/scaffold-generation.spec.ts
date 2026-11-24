@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { parseSessionLog, prepareSessionSnapshotFixtureForComparison } from '@deepseek-ai/dsh-llm-replay'
 import {
   assertFixtureInventory,
+  normalizeWebSessionVolatiles,
+  parseSeedFixture,
   recordedSessionFixturePath,
   selectedSessionFixture,
 } from './scaffold.ts'
@@ -12,6 +15,33 @@ const roots: string[] = []
 
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
+})
+
+describe('Web seed stream timing', () => {
+  it.each([2, 3])('preserves embedded timestamps from format v%i and its current projection', async (version) => {
+    const fixture = await readFile(new URL(`../../../snapshots/session/skill-load/session.v${version}.jsonl`, import.meta.url), 'utf8')
+    const current = prepareSessionSnapshotFixtureForComparison(fixture)
+    const expected = parseSessionLog(current)
+
+    expect(parseSeedFixture(fixture).events).toEqual(expected)
+    expect(parseSeedFixture(current).events).toEqual(expected)
+  })
+
+  it.each(['session.jsonl', 'session.v1.jsonl'])('reconstructs positive stream intervals from %s', async (filename) => {
+    const fixture = await readFile(new URL(`../../../snapshots/session/text-turn/${filename}`, import.meta.url), 'utf8')
+    const messages = parseSeedFixture(fixture).events.filter(event => event.type === 'assistant/message')
+    expect(messages).toHaveLength(1)
+    const stream = messages[0]!.data.stream
+    expect(stream.length).toBeGreaterThan(1)
+
+    let previousEnd = -1
+    for (const record of stream) {
+      const start = 'time' in record ? record.time : record.time0
+      expect(start).toBeGreaterThan(previousEnd)
+      previousEnd = 'time' in record ? record.time : record.time0 + record.dt.reduce((total, delta) => total + delta, 0)
+    }
+    expect(previousEnd).toBeGreaterThan(0)
+  })
 })
 
 describe('Web snapshot generation filenames', () => {
@@ -72,5 +102,34 @@ describe('Web snapshot generation filenames', () => {
 
     await expect(assertFixtureInventory(root, ['session.jsonl', 'ui.expected.md']))
       .resolves.toBeUndefined()
+  })
+})
+
+describe('Web snapshot working directories', () => {
+  it.each([
+    ['/workspace', '/workspace/recipient', '/workspace-other/result.txt'],
+    ['C:\\workspace', 'C:\\workspace\\recipient', 'C:\\workspace-other\\result.txt'],
+  ])('preserves recipient subdirectories below %s', (workspace, recipient, sibling) => {
+    const log = `${JSON.stringify({ type: 'session', cwd: recipient })}\n`
+      + `${JSON.stringify({ path: recipient, unrelated: sibling })}\n`
+    const relative = recipient.slice(workspace.length)
+
+    expect(normalizeWebSessionVolatiles(log, workspace, 'workspace')).toBe(
+      `${JSON.stringify({ type: 'session', cwd: `{{cwd}}${relative}` })}\n`
+      + `${JSON.stringify({ path: `{{cwd}}${relative}`, unrelated: sibling })}\n`,
+    )
+  })
+
+  it.each([undefined, ''])('rejects workspace mode with cwd %j', (workspace) => {
+    const log = `${JSON.stringify({ type: 'session', cwd: '/workspace/recipient' })}\n`
+    expect(() => normalizeWebSessionVolatiles(log, workspace, 'workspace'))
+      .toThrow('workspace cwd normalization requires a non-empty workspaceCwd')
+  })
+
+  it('uses the Session directory by default without requiring a workspace', () => {
+    const log = `${JSON.stringify({ type: 'session', cwd: '/workspace/recipient' })}\n`
+    expect(normalizeWebSessionVolatiles(log)).toBe(
+      `${JSON.stringify({ type: 'session', cwd: '{{cwd}}' })}\n`,
+    )
   })
 })

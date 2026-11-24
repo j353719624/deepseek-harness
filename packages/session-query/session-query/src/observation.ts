@@ -22,6 +22,12 @@ export interface SessionObservation extends Disposable {
   /** Exact fork-inherited event count paired with {@link header}. */
   readonly inheritedEventCount: SessionLogOffsetType
   /**
+   * Cold observations only: how many of {@link events} are stored, before the
+   * interrupted-turn repairs the read appended in memory. A live observation
+   * omits it; every live event is stored or drained before a sharing fork.
+   */
+  readonly persistedEventCount?: SessionLogOffsetType
+  /**
    * Immutable contiguous events at {@link cursor}. A live observation
    * materializes this array on first read, so a consumer that reads only the
    * header, cursor, or projections never copies the log.
@@ -54,8 +60,9 @@ export interface SessionObservationOptions {
  * instance still reports the same revision.
  */
 interface PreparedEntry {
-  /** The persistence instance whose `stat` produced {@link revision}; revisions from another instance are incomparable. */
-  readonly persistence: SessionPersistence
+  readonly persistedEventCount: SessionLogOffsetType
+  /** Stable service identity whose `stat` produced this revision; proxy references are not instance identities. */
+  readonly persistenceIdentity: symbol
   /** Durable revision observed by `stat` immediately before the log read. */
   readonly revision: SessionPersistenceRevision
   /** Unpublished Session restored from the balanced log; never entered into the store. */
@@ -93,6 +100,7 @@ export class SessionObservationReader {
    * @param sessionId - logical Session identity.
    * @param options - cancellation and all-or-none projection computation for this read.
    * @returns one exact immutable observation.
+   * @throws {@link SessionQueryError} with code `SESSION_QUERY_CORRUPT_SESSION` when live or prepared projection computation fails.
    */
   async read(
     sessionId: SessionId,
@@ -108,8 +116,10 @@ export class SessionObservationReader {
 
       const snapshot = await this.statSource(persistence, sessionId, signal)
       const attachedDuringStat = this.ctx.sessions.get(sessionId)
-      if (attachedDuringStat !== undefined) return this.live(attachedDuringStat, projectionMode)
-      let entry = this.cachedEntry(persistence, sessionId, snapshot.revision)
+      if (attachedDuringStat !== undefined) {
+        return this.live(attachedDuringStat, projectionMode)
+      }
+      let entry = this.cachedEntry(persistence.identity, sessionId, snapshot.revision)
       if (entry === undefined) {
         const loaded = await this.loadSource(persistence, sessionId, signal)
         throwIfObservationAborted(signal)
@@ -138,7 +148,8 @@ export class SessionObservationReader {
           )
         }
         entry = {
-          persistence,
+          persistedEventCount: loaded.persistedEventCount,
+          persistenceIdentity: persistence.identity,
           revision: snapshot.revision,
           session,
           events: Object.freeze(seed),
@@ -201,12 +212,12 @@ export class SessionObservationReader {
 
   /** Return a still-valid cached entry and mark it most recently used. */
   private cachedEntry(
-    persistence: SessionPersistence,
+    persistenceIdentity: symbol,
     sessionId: SessionId,
     revision: SessionPersistenceRevision,
   ): PreparedEntry | undefined {
     const cached = this.cache.get(sessionId)
-    if (cached === undefined || cached.persistence !== persistence || cached.revision !== revision) {
+    if (cached === undefined || cached.persistenceIdentity !== persistenceIdentity || cached.revision !== revision) {
       return undefined
     }
     this.cache.delete(sessionId)
@@ -251,6 +262,7 @@ export class SessionObservationReader {
         source: 'prepared',
         header: entry.session.header,
         inheritedEventCount: entry.session.inheritedEventCount,
+        persistedEventCount: entry.persistedEventCount,
         events: entry.events,
         cursor: entry.events.at(-1)?.seq ?? -1,
         revision: entry.revision,
@@ -279,9 +291,18 @@ export class SessionObservationReader {
     // below `seq` is the same array whenever a consumer first reads `events`.
     const seq = session.seq
     let materialized: readonly SessionEvent[] | undefined
-    const projections = projectionMode === 'none'
-      ? undefined
-      : this.ctx.get('sessionProjections')?.snapshot(session)
+    let projections: ProjectionSnapshot | undefined
+    try {
+      projections = projectionMode === 'none'
+        ? undefined
+        : this.ctx.get('sessionProjections')?.snapshot(session)
+    } catch (error: unknown) {
+      throw new SessionQueryError(
+        `failed to project session "${session.id}": ${errorMessage(error)}`,
+        'SESSION_QUERY_CORRUPT_SESSION',
+        { cause: error },
+      )
+    }
     const lease = (): SessionObservation => {
       let disposed = false
       return {

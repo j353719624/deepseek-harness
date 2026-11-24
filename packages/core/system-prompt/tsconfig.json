@@ -24,7 +24,10 @@
       "path": "../../core/scope"
     },
     {
-      "path": "../../runtime-diagnostics/invariants"
+      "path": "../../core/session"
+    },
+    {
+      "path": "../../session/session-projection"
     }
   ]
 }

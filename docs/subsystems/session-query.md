@@ -24,6 +24,8 @@ interface SessionRecord {
   live: boolean
   /** Whether the active persistence backend currently lists the id, including a created-but-unmaterialized session it already observes. */
   persisted: boolean
+  /** Current for live Sessions; otherwise the persistence format status when reported. */
+  formatStatus?: 'current' | 'migration-required'
 }
 ```
 
@@ -380,6 +382,13 @@ Exact reads, filters, and traces are backend-independent concrete behavior. A ba
 
 ```ts cordis-catalog
 /**
+ * Read the metadata that summarizes one live or prepared Session in a Session list.
+ * @param session - live or prepared Session to summarize.
+ * @returns whether the Session has no turn, and its latest human-authored prompt time.
+ */
+getListMetadata(session: Session): SessionListMetadata
+
+/**
  * Observe one exact live or prepared Session without a persistence listing preflight.
  * @param sessionId - logical Session identity.
  * @param options - cancellation and projection selection for this read.
@@ -503,7 +512,7 @@ async traceEvent(request: SessionEventTraceRequest, signal?: AbortSignal): Promi
 async readEvent(request: SessionEventReadRequest, signal?: AbortSignal): Promise<SessionEventWindow>
 ```
 
-Types: [SessionId](core.md) · [SessionTitleSnapshot](session-title.md)
+Types: [Session](session.md) · [SessionId](core.md) · [SessionTitleSnapshot](session-title.md)
 
 Source: [`packages/session-query/session-query/src/index.ts`](../../packages/session-query/session-query/src/index.ts)
 <!-- END GENERATED cordis-surface -->

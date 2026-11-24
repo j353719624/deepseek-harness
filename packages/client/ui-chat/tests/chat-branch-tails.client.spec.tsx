@@ -3,11 +3,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
+import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import type {
   ChatConversationViewNode, ConversationNode,
 } from '@deepseek-ai/dsh-client-ui-chat/client'
-import type { ChatNodeViewProps } from '../src/client/contract/slots.ts'
+import type { ChatNodeViewProps, UserContentInput } from '../src/client/contract/slots.ts'
 import {
   formatMessageClock, msUntilNextLocalMidnight, startOfLocalDay,
 } from '../src/client/chat/message-chrome.ts'
@@ -15,8 +16,13 @@ import {
   CompactionNodeView, ContextMessageNodeView, RetryNodeView, UnknownNodeView,
   UserMessageNodeView,
 } from '../src/client/chat/MessageItem.tsx'
-import { AssistantMarkdown, type AssistantMarkdownProps } from '../src/client/chat/AssistantMarkdown.tsx'
-import { StatsPills } from '../src/client/chat/StatsPills.tsx'
+import { AssistantMarkdown } from '../src/client/chat/AssistantMarkdown.tsx'
+import { useDetailedPresentation } from './presentation-fixture.client.ts'
+import { unusedImageLoader } from './reasoning-component-fixture.tsx'
+import { createUserContentFixture } from './user-content-component-fixture.tsx'
+import { useDisclosure } from '../src/client/chat/use-disclosure.ts'
+import { useSearchableHidden } from '../src/client/chat/searchable-hidden.ts'
+import { ActivityPill, UsagePill, type StatPillProps } from '../src/client/chat/StatsPills.tsx'
 import { zh } from '../src/client/locale.ts'
 import { chatSnapshotFixture } from './chat-snapshot-fixture.client.ts'
 
@@ -27,7 +33,14 @@ afterEach(() => {
 })
 
 const t: ChatNodeViewProps['t'] = makeTranslate(zh, commonZh)
-const renderMessageImages: AssistantMarkdownProps['renderMessageImages'] = () => null
+const renderUserImages: Parameters<ReturnType<typeof createUserContentFixture>>[1] = () => null
+const userSlots: PropsRenderSlots<'conversation.chat.user.before'> = {
+  renderSlot: () => null,
+  renderSlotChain: (_key, _owner, opts) => opts?.fallback ?? null,
+  SessionProvider: ({ children }) => <>{children}</>,
+}
+let renderUserContent: ReturnType<typeof createUserContentFixture>
+beforeEach(() => { renderUserContent = createUserContentFixture() })
 const RETRY_ID = 'retry-fixture' as Extract<ConversationNode, { kind: 'model-retry' }>['retryId']
 
 // Recency scans the whole transcript; a detached fixture is its own latest row.
@@ -39,12 +52,13 @@ const useDetachedChat: ChatNodeViewProps['useChat'] = bindSnapshotSelector({
 interface MessageItemProps {
   readonly node: ConversationNode
   readonly t: ChatNodeViewProps['t']
+  readonly openCompaction?: React.ComponentProps<typeof CompactionNodeView>['openCompaction']
   readonly referenceLabels?: readonly string[]
   readonly skillNames?: readonly string[]
 }
 
 /** Legacy-node fixture adapter for the independently registered renderers. */
-function MessageItem({ node, t: translate, referenceLabels, skillNames }: MessageItemProps) {
+function MessageItem({ node, t: translate, openCompaction, referenceLabels, skillNames }: MessageItemProps) {
   const kind = node.kind === 'assistant' ? 'assistant-step' : node.kind
   const viewNode: ChatConversationViewNode = {
     key: `fixture:${node.kind}:${node.seq}`,
@@ -64,17 +78,24 @@ function MessageItem({ node, t: translate, referenceLabels, skillNames }: Messag
         }
         : node,
   }
-  const props = {
-    node: viewNode, t: translate, renderMessageImages, openFile: vi.fn(), openSkill: vi.fn(), useChat: useDetachedChat,
-  } as unknown as ChatNodeViewProps
+  const renderUserFactory: ChatNodeViewProps['renderFactorySlot'] = (name, input) => {
+    if (name !== 'conversation.chat.user.content') throw new Error(`Unexpected user Factory: ${name}`)
+    return renderUserContent(input as UserContentInput, renderUserImages, translate)
+  }
+  const props: Partial<Omit<ChatNodeViewProps, 'node'>> & { node: ChatConversationViewNode } = {
+    node: viewNode, t: translate, loadImage: unusedImageLoader, renderFactorySlot: renderUserFactory,
+    openFile: vi.fn(), useChat: useDetachedChat,
+  }
   switch (node.kind) {
     case 'user':
+      return <UserMessageNodeView {...props as ChatNodeViewProps<'user'>} {...userSlots} />
     case 'steering':
-      return <UserMessageNodeView {...props as ChatNodeViewProps<'user' | 'steering'>} />
+      return <UserMessageNodeView {...props as ChatNodeViewProps<'steering'>} renderSlotChain={() => null} />
     case 'context':
       return <ContextMessageNodeView {...props as ChatNodeViewProps<'context'>} />
     case 'compaction':
-      return <CompactionNodeView {...props as ChatNodeViewProps<'compaction'>} />
+      return <CompactionNodeView {...props as ChatNodeViewProps<'compaction'>}
+        openCompaction={openCompaction ?? vi.fn()} useCompactionPreview={select => select(openCompaction !== undefined)} />
     case 'model-retry':
       return <RetryNodeView {...props as ChatNodeViewProps<'model-retry'>} />
     case 'unknown':
@@ -165,16 +186,21 @@ describe('MessageItem arms', () => {
     // Same-day clock: construct "today at 14:24" so the label stays `HH:mm`.
     const now = new Date()
     const time = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 14, 24).getTime()
-    render(
+    const view = render(
       <MessageItem t={t} node={{
         kind: 'user', seq: 1, time,
-        content: [{ type: 'text', text: 'hello bubble' }] as never,
+        content: [{ type: 'text', text: 'hello ' }, { type: 'text', text: 'bubble' }],
         source: null,
       }}
       />,
     )
     expect(screen.getByText('14:24')).toBeTruthy()
     expect(screen.getByRole('button', { name: '复制' })).toBeTruthy()
+    const stack = view.getByText('hello bubble').closest('div')?.parentElement
+    expect(stack?.parentElement).toBe(view.container.firstElementChild)
+    expect(stack?.contains(screen.getByText('14:24'))).toBe(false)
+    expect(stack?.contains(screen.getByRole('button', { name: '复制' }))).toBe(false)
+    expect(stack?.nextElementSibling?.contains(screen.getByRole('button', { name: '复制' }))).toBe(true)
     expect(screen.queryByRole('button', { name: '在新对话中分支' })).toBeNull()
     expect(screen.queryByRole('button', { name: '编辑' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '复制' }))
@@ -203,11 +229,32 @@ describe('MessageItem arms', () => {
     expect(exec).toHaveBeenCalledWith('copy')
   })
 
+  it('user copy succeeds through execCommand when the host refuses the async write', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+    })
+    const exec = vi.fn().mockReturnValue(true)
+    Object.defineProperty(document, 'execCommand', { configurable: true, value: exec })
+    render(
+      <MessageItem t={t} node={{
+        kind: 'user', seq: 1, time: 1_000,
+        content: [{ type: 'text', text: 'refused body' }] as never,
+        source: null,
+      }}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '复制' }))
+    expect(await screen.findByRole('button', { name: '复制成功' })).toBeTruthy()
+    expect(exec).toHaveBeenCalledWith('copy')
+  })
+
   it('user copy never claims success when the host rejects the write', async () => {
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
     })
+    Object.defineProperty(document, 'execCommand', { configurable: true, value: vi.fn(() => false) })
     render(
       <MessageItem t={t} node={{
         kind: 'user', seq: 1, time: 1_000,
@@ -331,7 +378,7 @@ describe('MessageItem arms', () => {
         kind: 'context',
         seq: 3,
         content: [{ type: 'text', text: 'line one\n\nline two' }],
-        source: { kind: 'plugin', plugin: 'fixture', empty: {}, list: [] },
+        source: { kind: 'fixture', empty: {}, list: [] },
         producer: { role: 'inject', label: 'fixture' },
         form: null,
       } as never}
@@ -351,7 +398,7 @@ describe('MessageItem arms', () => {
     expect(ctxView.container.querySelector('[data-context-text]')?.textContent)
       .toBe('line one\n\nline two')
     const fields = [...ctxView.container.querySelectorAll('[data-context-fields] dt')].map(node => node.textContent)
-    expect(fields).toEqual(['plugin', 'empty', 'list'])
+    expect(fields).toEqual(['empty', 'list'])
 
     fireEvent.keyDown(disclosure, { key: ' ' })
     expect(disclosure.getAttribute('aria-expanded')).toBe('false')
@@ -650,7 +697,7 @@ describe('MessageItem arms', () => {
     const view = render(
       <MessageItem t={t} node={{
         kind: 'context', seq: 3, content: [{ type: 'text', text: 'x' }],
-        source: { kind: 'plugin', plugin: 'later', form: 'a-later-form' },
+        source: { kind: 'later', form: 'a-later-form' },
         producer: { role: 'inject', label: 'later' },
         form: null,
       } as never}
@@ -658,7 +705,7 @@ describe('MessageItem arms', () => {
     )
     fireEvent.click(view.getByRole('button', { name: /^上下文注入\s*later$/ }))
     const fields = [...view.container.querySelectorAll('[data-context-fields] dt')].map(node => node.textContent)
-    expect(fields).toEqual(['plugin', 'form'])
+    expect(fields).toEqual(['form'])
   })
 
   it('the snapshot form attributes each part to the subsystem that produced it', () => {
@@ -668,8 +715,7 @@ describe('MessageItem arms', () => {
         seq: 3,
         content: [{ type: 'text', text: 'Current runtime context.\n\nsandbox\n\nworkspace' }],
         source: {
-          kind: 'plugin',
-          plugin: '@deepseek-ai/dsh-system-prompt',
+          kind: 'runtime-context',
           form: 'snapshot',
           sections: [{ name: 'sandbox:policy', text: 'workspace-write' }, { name: 'workspace', text: '/repo' }],
         },
@@ -690,7 +736,7 @@ describe('MessageItem arms', () => {
         kind: 'context',
         seq: 3,
         content: [{ type: 'text', text: 'background job bash-1 finished.' }],
-        source: { kind: 'plugin', plugin: 'tool-jobs', form: 'notice', summary: 'bash pnpm test [status: completed]' },
+        source: { kind: 'tool-jobs', form: 'notice', summary: 'bash pnpm test [status: completed]' },
         producer: { role: 'inject', label: 'tool-jobs' },
         form: 'notice',
       } as never}
@@ -705,7 +751,7 @@ describe('MessageItem arms', () => {
     const view = render(
       <MessageItem t={t} node={{
         kind: 'context', seq: 3, content: [{ type: 'text', text: 'notice prose' }],
-        source: { kind: 'plugin', plugin: 'tool-jobs', form: 'notice' },
+        source: { kind: 'tool-jobs', form: 'notice' },
         producer: { role: 'inject', label: 'tool-jobs' },
         form: 'notice',
       } as never}
@@ -753,6 +799,23 @@ describe('MessageItem arms', () => {
     fireEvent.click(view.getByRole('button', { name: /^上下文注入\s*plugin$/ }))
     expect(view.container.querySelector('[data-context-snapshot-supersedes]')?.textContent)
       .toBe('取代先前的快照')
+  })
+
+  it('an empty runtime snapshot keeps the cleared reminder visible', () => {
+    const text = '<system-reminder>\nCurrent runtime context: none. Earlier runtime-context snapshots no longer apply.\n</system-reminder>'
+    const view = render(
+      <MessageItem t={t} node={{
+        kind: 'context', seq: 3, content: [{ type: 'text', text }],
+        source: { kind: 'runtime-context', form: 'snapshot', sections: [] },
+        producer: { role: 'inject', label: 'runtime-context' },
+        form: 'snapshot',
+      } as never}
+      />,
+    )
+    fireEvent.click(view.getByRole('button', { name: /^上下文注入\s*runtime-context$/ }))
+    expect(view.container.querySelector('[data-context-text]')?.textContent).toBe(text)
+    expect(view.container.querySelector('[data-context-sections]')).toBeNull()
+    expect(view.queryByText('取代先前的快照')).toBeNull()
   })
 
   it('a relay names the agent that sent it above what it said', () => {
@@ -808,57 +871,47 @@ describe('MessageItem arms', () => {
     expect(unknownView.getByText(/未知 surface 事件：surface\/next/)).toBeTruthy()
   })
 
-  it('a compaction marker discloses its summary and never shows the framed checkpoint', () => {
+  it.each([
+    [{ status: 'running' }, 'running', t('message.compaction.running')],
+    [{ status: 'interrupted' }, 'error', t('message.taskStopped')],
+    [{ status: 'ended' }, 'ok', t('command.done')],
+    [{ status: 'ended', error: 'Failure\nDetails' }, 'error', 'Failure Details'],
+  ] as const)('renders automatic compaction progress %j', (progress, state, summary) => {
+    const node = { data: { kind: 'compaction-progress', ...progress } }
+    const view = render(<CompactionNodeView {...{ node, t } as ChatNodeViewProps<'compaction'>}
+      useCompactionPreview={select => select(false)} openCompaction={vi.fn()} />)
+    expect(view.container.querySelector(`[data-state="${state}"]`)).toBeTruthy()
+    expect(view.getByText(summary)).toBeTruthy()
+  })
+
+  it('a compaction marker opens its summary seq in the Sidebar and never shows the framed checkpoint', () => {
+    const openCompaction = vi.fn<(seq: number, signal: AbortSignal) => Promise<string | null>>(async () => null)
     const view = render(
-      <MessageItem t={t} node={{
-        kind: 'compaction', seq: 5, time: 1_000,
-        summary: '## 摘要标题\n\n保留的事实。',
-        summaryEventSeq: 4,
+      <MessageItem t={t} openCompaction={openCompaction} node={{
+        kind: 'compaction', seq: 5, summaryEventSeq: 4, time: 1_000,
         shadowedItemCount: 16,
         shadowedTokenCount: 11_309,
       }}
       />,
     )
-    const row = view.getByRole('button', { name: /上下文已压缩/ })
-    expect(row.getAttribute('aria-expanded')).toBe('false')
+    const row = view.getByRole('button', { name: /上下文已压缩.*在侧栏查看压缩摘要/ })
+    expect(row).toHaveProperty('disabled', false)
+    expect(row.getAttribute('aria-expanded')).toBeNull()
     expect(view.getByText('已压缩 16 条历史记录（约 11309 tokens）')).toBeTruthy()
-    expect(view.queryByText(/保留的事实/)).toBeNull()
     fireEvent.click(row)
-    expect(row.getAttribute('aria-expanded')).toBe('true')
-    expect(view.getByRole('heading', { name: '摘要标题' })).toBeTruthy()
-    fireEvent.click(row)
-    expect(row.getAttribute('aria-expanded')).toBe('false')
+    expect(openCompaction).toHaveBeenCalledExactlyOnceWith(4, expect.any(AbortSignal))
+    expect(view.container.querySelector('[class*="compactionBody"]')).toBeNull()
   })
 
-  it('anchors the sticky-header selector: the compaction body sits under compactionRow only while open', () => {
-    const view = render(
-      <MessageItem t={t} node={{
-        kind: 'compaction', seq: 5, time: 1_000,
-        summary: '## 摘要标题\n\n保留的事实。',
-        summaryEventSeq: 4,
-        shadowedItemCount: 16,
-        shadowedTokenCount: 11_309,
-      }}
-      />,
-    )
-    // Collapsed there is no body sibling, so the rule's `:has(.compactionBody)`
-    // gate never matches.
-    expect(view.container.querySelector('[class*="compactionRow"] [class*="compactionBody"]')).toBeNull()
-    fireEvent.click(view.getByRole('button', { name: /上下文已压缩/ }))
-    expect(view.container.querySelector('[class*="compactionRow"] [class*="compactionBody"]')).not.toBeNull()
-  })
-
-  it('a marker whose cited summary event fell outside the window is not expandable', () => {
+  it('a marker without a Sidebar opener is disabled and keeps neutral copy without counts', () => {
     const view = render(<MessageItem t={t} node={{
-      kind: 'compaction', seq: 6, time: 1_000, summary: null,
-      summaryEventSeq: null, shadowedItemCount: null, shadowedTokenCount: null,
+      kind: 'compaction', seq: 6, summaryEventSeq: 5, time: 1_000, shadowedItemCount: null, shadowedTokenCount: null,
     }} />)
     const row = view.getByRole('button', { name: /上下文已压缩/ })
     expect(row).toHaveProperty('disabled', true)
-    expect(row.getAttribute('aria-expanded')).toBeNull()
-    expect(view.getByText('压缩摘要不可用')).toBeTruthy()
-    fireEvent.click(row) // a disabled control stays collapsed
-    expect(row.getAttribute('aria-expanded')).toBeNull()
+    expect(view.getByText('较早的历史已压缩为摘要')).toBeTruthy()
+    expect(view.queryByText('在侧栏查看压缩摘要')).toBeNull()
+    fireEvent.click(row)
   })
 
   it('collapses retry details behind the durable model retry status', () => {
@@ -1044,17 +1097,18 @@ describe('useCalendarDay boundary refresh', () => {
 describe('small branch tails', () => {
   it('AssistantMarkdown single-line reasoning summary skips the newline cut', () => {
     const view = render(
-      <AssistantMarkdown
+      <AssistantMarkdown renderSlot={() => null} useDisclosure={useDisclosure} useGroupAction={useSearchableHidden}
+        usePresentation={useDetailedPresentation}
         t={t}
         blocks={[{ kind: 'reasoning', text: 'one-liner' }]}
         streaming={false}
-        renderMessageImages={renderMessageImages}
+        loadImage={unusedImageLoader}
       />,
     )
     expect(view.getByText('one-liner')).toBeTruthy()
   })
 
-  it('StatsPills omits the cache-hit segment when no input accounting exists at all', () => {
+  it('composer stats omit the cache-hit segment when no input accounting exists at all', () => {
     // Cache hit is null only when all three prompt buckets are zero (pure
     // output accounting) — any billed input makes it a real 0%.
     const nodes = [{
@@ -1062,14 +1116,19 @@ describe('small branch tails', () => {
     }] as const
     const snap = chatSnapshotFixture({ nodes })
     const source = { getSnapshot: () => snap, subscribe: () => () => {} }
+    const pillProps: StatPillProps = {
+      usePerformanceUsage: selector => selector('detailed'),
+      t,
+      useChat: bindSnapshotSelector(source),
+      useProjection: (key: string) => key === 'tokenUsage'
+        ? { uncachedInputTokens: 0, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 }
+        : undefined,
+    }
     const view = render(
-      <StatsPills
-        t={t}
-        useChat={bindSnapshotSelector(source)}
-        useProjection={(key: string) => key === 'tokenUsage'
-          ? { uncachedInputTokens: 0, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 }
-          : undefined}
-      />,
+      <>
+        <ActivityPill {...pillProps} />
+        <UsagePill {...pillProps} />
+      </>,
     )
     // The untimed counts pill renders static, so the usage pill is the only button.
     const [usagePill] = [...view.getAllByRole('button')] as [HTMLElement]

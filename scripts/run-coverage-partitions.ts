@@ -1,12 +1,12 @@
-/** CLI entry for partitioned Vitest coverage. */
+/** CLI entry for partitioned Vitest coverage, optionally limited to one `DSH_COVERAGE_SHARD` file shard. */
 import { resolve } from 'node:path'
 import {
   COVERAGE_PARTITIONS_ENV,
-  COVERAGE_TEST_TIMEOUT_ENV,
+  COVERAGE_SHARD_ENV,
   CoveragePartitionCoordinator,
-  coverageTestTimeoutArgs,
   forwardedCoverageArgs,
   parseCoveragePartitionCount,
+  parseCoverageShard,
 } from './coverage-partitions.ts'
 
 const partitions = parseCoveragePartitionCount(process.env[COVERAGE_PARTITIONS_ENV])
@@ -18,13 +18,12 @@ if (pnpmEntrypoint === undefined || pnpmEntrypoint === '') {
   throw new Error('partitioned coverage must be invoked through a pnpm package script.')
 }
 
+const shard = parseCoverageShard(process.env[COVERAGE_SHARD_ENV])
 const coordinator = new CoveragePartitionCoordinator({
   root: resolve(import.meta.dirname, '..'),
   partitions,
   pnpmEntrypoint,
-  vitestArgs: [
-    ...coverageTestTimeoutArgs(process.env[COVERAGE_TEST_TIMEOUT_ENV]),
-    ...forwardedCoverageArgs(process.argv.slice(2)),
-  ],
+  vitestArgs: forwardedCoverageArgs(process.argv.slice(2)),
+  ...shard === undefined ? {} : { shard },
 })
 process.exitCode = await coordinator.run()

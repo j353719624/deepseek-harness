@@ -69,13 +69,13 @@ kind: "package-reference"
 该 seam 建立在一个拆分与三项承诺之上：
 
 - **抽象约定，具体后端。** 接口规定压缩做什么；提供方拥有策略、保留与摘要，因此各角色可独立演进、独立替换。
-- **会话与 LLM（大语言模型）词汇是约定的一部分。** 操作作用于 `Session`，摘要使用 `ContentBlock`，因此尽管有通用的 Cordis-only 指引，Service Definition 仍依赖 `dsh-session` 与 `dsh-llm`——这是一项有意的偏离，记录在[压缩能力 seam Agent Note](../../../.agents/notes/implemented/feature/2026-06-18-compaction-capability-seam.zh.md) 中。
+- **会话与 LLM（大语言模型）词汇是约定的一部分。** 操作作用于 `Session`，摘要使用 `ContentBlock`，因此尽管有通用的 Cordis-only 指引，Service Definition 仍依赖 `dsh-session` 与 `dsh-llm`——这是一项有意的偏离，记录在[历史压缩能力 seam Agent Note](../../../.agents/notes/archived/feature/2026-06-18-compaction-capability-seam.md) 中。
 - **日志记录的标记对就是锁。** `compaction/start` 在摘要让出控制权之前追加，`compaction/end` 释放；每次失败都恰好进行一次闭合尝试，闭合失败会留下未匹配 start 作为有意的 busy 信号。
 - **表层只变更一次。** 摘要承载在标记对内的一条 `user/message` 替换上；所有 `compaction/*` 事件仅写入日志。
 
 ### 服务 API
 
-该约定是后端实现的三个抽象操作：`compactIfNeeded` 针对自动 `pressure` 或 `context-overflow` 触发，`compactNow` 进行一次显式按需缩减，`compactRegion` 针对调用方选择的表层范围。可复用的请求测量是独立服务 `ctx.tokenMeter`。穷尽式逐操作语义见[压缩子系统参考](../../../docs/subsystems/compaction.zh.md)；精确签名见 [`src/index.ts`](src/index.ts)。
+该约定是后端实现的三个抽象操作：`compactIfNeeded` 针对自动 `pressure` 或 `context-overflow` 触发，`compactNow` 进行一次显式按需缩减，`compactRegion` 针对调用方选择的平衡范围，不含初始系统消息。可复用的请求测量是独立服务 `ctx.tokenMeter`。穷尽式逐操作语义见[压缩子系统参考](../../../docs/subsystems/compaction.zh.md)；精确签名见 [`src/index.ts`](src/index.ts)。
 
 通过 `ctx.llm.stream()` 摘要的后端必须将 signal 转发到调用的 `GenerateOptions.signal`，因此 abort 或 fiber dispose（资源释放）会停止进行中的摘要。自动和显式范围标记对会从打开的轮次恢复其数字形式归属；手动标记对不要求存在打开的轮次，并标记 `turn: null`。
 
@@ -92,9 +92,9 @@ kind: "package-reference"
 
 ### 表层约定
 
-`SurfaceEventType` 是封闭联合——`user/message`、`assistant/message` 与 `tool/result` 必须携带 `surfaceOp`，其他事件禁止携带该字段，因此 `compaction/*` 事件不能出现在表层上。成功的后端运行改为在日志中包围整个操作：先追加 `compaction/start`（仅日志）获取锁，摘要该范围，追加仅日志的 `compaction/summary` 记录，用一条承载摘要的 `user/message` 替换所选范围——这是唯一的表层变更——最后追加 `compaction/end`（仅日志）释放锁。
+成功的后端操作依次记录 `compaction/start`、仅写入日志的 `compaction/summary`、替换用的 `user/message` 检查点以及 `compaction/end`。检查点仅替换选中范围。[agent loop](../../core/agent-loop/README.zh.md#understand-the-implementation) 在下一次模型尝试前重建当前系统指令。
 
-替换位于锁的起止范围**内**，因此 `compaction/start` 与 `compaction/end` 之间崩溃会留下可检测的遗留锁，而不是虚假声称成功的 `compaction/end`。`deriveMessages()` 将摘要渲染为 user 角色消息，后面跟随已保留节点；已遮蔽事件仍保留在原始日志中，因此回放具有确定性。每个事件的具体 payload 见[压缩子系统参考](../../../docs/subsystems/compaction.zh.md)。
+替换位于锁的起止范围**内**，因此 `compaction/start` 与 `compaction/end` 之间崩溃会留下可检测的遗留锁，而不是虚假声称成功的 `compaction/end`。`deriveMessages()` 在选区位置将摘要渲染为 user 角色消息；已遮蔽事件仍保留在原始日志中，因此回放具有确定性。每个事件的具体 payload 见[压缩子系统参考](../../../docs/subsystems/compaction.zh.md)。
 
 ### 源码地图
 
@@ -105,7 +105,6 @@ kind: "package-reference"
 | [`src/tool-pairing.ts`](src/tool-pairing.ts) | 两个边界 helper 背后的每会话切分点平衡缓存 |
 | [`src/checkpoint.ts`](src/checkpoint.ts) | 无 Cordis 依赖的检查点来源构造函数与谓词（`./checkpoint` 叶子） |
 | [`src/brand.ts`](src/brand.ts) | `CompactionId` 品牌化标识 |
-| [`src/invariant.ts`](src/invariant.ts) | 不变量配套组件：校验 `compaction/start`→`summary`→`end` 标记对、其属主轮次包裹与检查点关联 |
 
 ### 锁与串行化
 
@@ -129,7 +128,7 @@ kind: "package-reference"
 - [工具结果修剪器](../compaction-tool-result-pruner/README.zh.md)——先修剪超大工具输出的可选配套工具。
 - [面向用户的 /compact 命令](../command-compact/README.zh.md)——按需触发压缩的入口。
 - [Token meter](../../llm/token-meter/README.zh.md)——决定何时压缩的测量服务。
-- [压缩能力 seam Agent Note](../../../.agents/notes/implemented/feature/2026-06-18-compaction-capability-seam.zh.md)——拆分及 session/llm 依赖的依据。
+- [历史压缩能力 seam Agent Note](../../../.agents/notes/archived/feature/2026-06-18-compaction-capability-seam.md)——拆分及 session/llm 依赖的依据。
 
 -----
 
@@ -140,7 +139,7 @@ kind: "package-reference"
 
 #### 模型看到的内容
 
-成功的后端会用一条 user 角色摘要检查点替换较早表层范围——一条携带 `surfaceOp: { op: 'replace', startSeq, endSeq }` 的 `user/message`。原始事件仍会记录，但不再出现在派生模型消息中；seam 本身不执行改写。
+成功的后端会用一条 user 角色摘要检查点替换所选对话范围——一条携带 `surfaceOp: { op: 'replace', startSeq, endSeq }` 的 `user/message`。原始事件仍会记录，但不再出现在派生模型消息中；seam 本身不执行改写。
 
 #### Token 影响
 
@@ -159,7 +158,7 @@ kind: "package-reference"
 
 - **面向用户的命令，而非模型工具**——压缩由 `/compact` 命令与自动压力触发；不会注册面向模型的压缩工具。
 - **部分单元溢出不在约定内**——平衡摘要压缩无法拆分一个不可分单元。当闭合工具对中可移除的主要部分是承载文本的工具结果时，可选剪枝配套服务仍可修复该工具对；无法压缩大型非工具节点，或不可剪枝剩余部分过大的工具单元。
-- **单独接近窗口大小的 envelope 不属于表层压缩工作**——压缩缩减派生历史，绝不缩减系统提示词、工具或会话前缀。
+- **单独接近窗口大小的 envelope 不属于表层压缩工作**——归并对话历史无法让必要系统指令或工具 schema 适应更小的窗口。
 
 <a id="dev-note"></a>
 ### 开发备注
@@ -171,6 +170,6 @@ kind: "package-reference"
 
 - **面向模型的工具，尚未决定**——压缩目前仅限用户命令。面向模型的压缩工具仍是开放问题；它需要自己的 schema，并与现有命令路径协调。
 - **模板与远程后端，尚未决定**——`SummaryResult` 约定已带有未标记的 `rawOutput` 变体，供不通过 `ctx.llm.stream()` 识别调用的摘要器使用，但此类后端尚未随附。
-- **`/compact` 的范围参数，尚未决定**——无参数形式使各命令适配器的行为保持稳定；显式范围仍由编程接口 `compactRegion()` 处理。
+- **`/compact` 的范围参数，尚未决定**——无参数形式使各命令适配器的行为保持稳定；显式选区端点仍由编程接口 `compactRegion()` 处理。
 
 </details>

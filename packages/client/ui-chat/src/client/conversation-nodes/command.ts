@@ -20,7 +20,7 @@ declare module '../contract/chat-nodes.ts' {
 
 type CommandId = CommandNode['commandId']
 
-const COMPACT_PLUGIN: CompactionCheckpointSource['plugin'] = 'compact'
+const COMPACT_KIND: CompactionCheckpointSource['kind'] = 'compact-checkpoint'
 
 interface CommandState {
   readonly command: CommandNode
@@ -80,13 +80,12 @@ function compactSource(event: Parameters<ConversationNodeDefinition['match']>[0]
   sourceCommandId?: CommandId
 } | undefined {
   if (event.type !== 'user/message' || !isReplacementSurfaceEvent(event)) return undefined
-  const source = event.data.source as unknown as {
+  const source = event.data.source as {
     kind?: unknown
-    plugin?: unknown
     compactionId?: unknown
     sourceCommandId?: CommandId
   }
-  if (source.kind !== 'plugin' || source.plugin !== COMPACT_PLUGIN || typeof source.compactionId !== 'string') return undefined
+  if (source.kind !== COMPACT_KIND || typeof source.compactionId !== 'string') return undefined
   return {
     compactionId: source.compactionId,
     ...source.sourceCommandId === undefined ? {} : { sourceCommandId: source.sourceCommandId },
@@ -100,17 +99,10 @@ function compactSource(event: Parameters<ConversationNodeDefinition['match']>[0]
  * @returns final compaction summary Node data.
  */
 function compactSummary(match: ConversationMatch | undefined, checkpoint: ConversationMatch): CompactionSummaryNode {
-  let summary: string | null = null
   let shadowedItemCount: number | null = null
   let shadowedTokenCount: number | null = null
   if (match?.event.type === 'compaction/summary') {
     const data = match.event.data
-    if (Array.isArray(data.summary)) {
-      const text = data.summary
-        .map(block => block.type === 'text' ? block.text : '')
-        .join('')
-      summary = text.trim() === '' ? null : text
-    }
     shadowedItemCount = Array.isArray(data.shadowedSeqs)
       && data.shadowedSeqs.every(seq => Number.isSafeInteger(seq) && seq >= 0)
       ? data.shadowedSeqs.length
@@ -124,7 +116,6 @@ function compactSummary(match: ConversationMatch | undefined, checkpoint: Conver
     kind: 'compaction',
     seq: checkpoint.event.seq,
     time: checkpoint.event.time,
-    summary,
     summaryEventSeq: match?.event.seq ?? null,
     shadowedItemCount,
     shadowedTokenCount,

@@ -31,6 +31,7 @@ kind: "package-group"
 | [`permission-presets/`](permission-presets/README.zh.md) | 把沙箱模式与审批策略捆绑为一个面向用户的权限选择器 | `ctx.permissionPresets` |
 | [`user-questions/`](user-questions/README.zh.md) | 定义经过校验的问题 schema 与作用域 answerer waterfall，agent 可暂停等待 | `ctx.userQuestions` |
 | [`tool-ask-user/`](tool-ask-user/README.zh.md) | 暴露 `ask_user_question` 工具，让模型可以向用户提问并请求其作出决定 | 注册到 `ctx.tools` |
+| [`action-cards/`](action-cards/README.zh.md) | 在回答下方提供可选操作卡片：`action-card` 代码块、卡片状态、用户操作与状态通知 | `ctx.actionCards` |
 
 -----
 
@@ -42,7 +43,7 @@ kind: "package-group"
 - [命令子系统](../../docs/subsystems/commands.zh.md)——命令注册表语义与 `ctx.commands` 的 Cordis 接口面。
 - [审批子系统](../../docs/subsystems/approval.zh.md)——请求／结果词汇、应答者瀑布与按会话策略。
 - [权限预设子系统](../../docs/subsystems/permission-presets.zh.md)——预设表与旋钮写穿。
-- [用户交互子系统](../../docs/subsystems/user-questions.zh.md)——问题词汇、answerer waterfall 与呈现意图。
+- [用户交互子系统](../../docs/subsystems/user-questions.zh.md)——问题词汇、answerer waterfall 与待处理问题生命周期。
 - [ACP 组](../acp/README.zh.md)——仅自动化的传输，为其自有 agent 回答审批请求。
 
 <a id="dev-note"></a>

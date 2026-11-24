@@ -7,7 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { NodePtcRuntime } from '@deepseek-ai/dsh-ptc-runtime-node'
+import { NodePtcRuntime, type Config as NodePtcRuntimeConfig } from '@deepseek-ai/dsh-ptc-runtime-node'
 import Lsp from '@deepseek-ai/dsh-lsp'
 import * as LspStdio from '@deepseek-ai/dsh-lsp-stdio'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
@@ -25,8 +25,15 @@ const bootstrap = process.env.DSH_SSH_TEST_BOOTSTRAP
 const languageServer = process.env.DSH_SSH_TEST_LSP
 const enabled = configPath !== undefined && process.platform !== 'win32'
 
+/** Node runtime program formats the remote PTC case runs under; `complete` renders a statement producing the program value. */
+const PTC_MODES = [
+  { mode: 'per-call', config: { executionMode: 'per-call' }, complete: (expression: string) => `return ${expression}` },
+  { mode: 'scoped REPL', config: { executionMode: 'persistent-in-memory', replScoped: true }, complete: (expression: string) => expression },
+] as const satisfies readonly { mode: string; config: NodePtcRuntimeConfig; complete: (expression: string) => string }[]
+
 async function setup() {
   const config = JSON.parse(readFileSync(configPath as string, 'utf8')) as Config
+  if (config.launch.kind !== 'node-script') throw new Error('live.e2e requires a Node script deployment; executable acceptance is owned by ssh-helper-runtime')
   const ctx = new Context()
   const projection = ctx.plugin(SessionProjectionRegistry)
   const policy = ctx.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: config.workspace })
@@ -55,7 +62,7 @@ async function processResult(handle: SubprocessHandle) {
 async function removeOwned(test: Awaited<ReturnType<typeof setup>>) {
   try {
     const handle = test.ctx.subprocess.spawn({
-      argv: [test.hello.node, '-e', 'require("node:fs").rmSync(process.argv[1],{recursive:true,force:true})', test.root],
+      argv: [test.hello.executable, '-e', 'require("node:fs").rmSync(process.argv[1],{recursive:true,force:true})', test.root],
       cwd: test.hello.workspace, stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } }, graceMs: 500,
     })
     await processResult(handle)
@@ -67,13 +74,13 @@ describe.skipIf(!enabled)('POSIX SSH runtime acceptance', () => {
     const test = await setup()
     try {
       const prepared = await test.ctx.ssh.request('process.prepare', {
-        argv: [test.hello.node, '-e', 'process.stdout.write("legitimate-target")'], cwd: test.root, graceMs: 500,
+        argv: [test.hello.executable, '-e', 'process.stdout.write("legitimate-target")'], cwd: test.root, graceMs: 500,
         stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', control: 'pipe' },
       }, preparedSchema)
       const endpoint = prepared.streams.control!
       const attack = "let connected=false,secure=false;const s=require('node:tls').connect({path:process.argv[1],ciphers:'PSK-AES256-GCM-SHA384',minVersion:'TLSv1.2',maxVersion:'TLSv1.2',pskCallback:()=>({identity:'dsh-stream',psk:Buffer.alloc(32)}),checkServerIdentity:()=>undefined});s.on('connect',()=>{connected=true});s.on('secureConnect',()=>{secure=true});s.on('error',()=>{});s.on('close',()=>process.stdout.write(JSON.stringify({connected,secure})));"
       const attacker = test.ctx.subprocess.spawn({
-        argv: (await test.ctx.sandbox.confine([test.hello.node, '-e', attack, endpoint.path], {
+        argv: (await test.ctx.sandbox.confine([test.hello.executable, '-e', attack, endpoint.path], {
           mode: 'read-only', workspaceRoot: test.root,
         })).argv,
         cwd: test.root, stdio: { stdin: 'ignore', stdout: { maxBytes: 4096 }, stderr: { maxBytes: 4096 } }, graceMs: 500,
@@ -124,7 +131,7 @@ describe.skipIf(!enabled)('POSIX SSH runtime acceptance', () => {
         .rejects.toMatchObject({ code: 'FS_SANDBOX_DENIED' })
       const createLink = 'const fs=require(\'node:fs\');const root=process.argv[1];fs.mkdirSync(root+\'/physical/child\',{recursive:true});fs.mkdirSync(root+\'/lexical\');fs.symlinkSync(root+\'/physical/child\',root+\'/lexical/link\');'
       await processResult(ctx.subprocess.spawn({
-        argv: [hello.node, '-e', createLink, root], cwd: root,
+        argv: [hello.executable, '-e', createLink, root], cwd: root,
         stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } }, graceMs: 500,
       }))
       const resolved = await ctx.fs.resolve('file.txt', { cwd: `${root}/lexical/link/..` })
@@ -139,7 +146,7 @@ describe.skipIf(!enabled)('POSIX SSH runtime acceptance', () => {
     const test = await setup()
     try {
       const code = 'const fs=require(\'node:fs\');const s=new(require(\'node:net\').Socket)({fd:7,readable:true,writable:true,allowHalfOpen:true});let a=[];s.on(\'data\',b=>a.push(b));s.on(\'end\',()=>{let denied;try{fs.writeFileSync(\'forbidden\',\'bad\')}catch(e){denied=e.code}process.stdout.write(JSON.stringify({pid:process.pid,denied,cgroup:process.platform===\'linux\'?fs.readFileSync(\'/proc/self/cgroup\',\'utf8\'):\'\'}));process.stderr.write(\'stderr\');s.end(Buffer.concat(a))});'
-      const argv = (await test.ctx.sandbox.confine([test.hello.node, '-e', code], { mode: 'read-only', workspaceRoot: test.root })).argv
+      const argv = (await test.ctx.sandbox.confine([test.hello.executable, '-e', code], { mode: 'read-only', workspaceRoot: test.root })).argv
       const handle = test.ctx.subprocess.spawn({
         argv, cwd: test.root,
         stdio: { stdin: 'ignore', stdout: { maxBytes: 4096 }, stderr: { maxBytes: 4096 }, control: 'pipe' }, graceMs: 1000,
@@ -167,7 +174,7 @@ describe.skipIf(!enabled)('POSIX SSH runtime acceptance', () => {
     try {
       const code = 'const s=new(require(\'node:net\').Socket)({fd:7,readable:true,writable:true});const b=Buffer.alloc(65536,120);let n=0;function pump(){while(n<10000){n++;if(!process.stdout.write(b))return}}process.stdout.on(\'drain\',pump);s.on(\'data\',v=>s.write(v));pump();setInterval(()=>{},1000);'
       handle = test.ctx.subprocess.spawn({
-        argv: (await test.ctx.sandbox.confine([test.hello.node, '-e', code], { mode: 'workspace-write', workspaceRoot: test.root })).argv,
+        argv: (await test.ctx.sandbox.confine([test.hello.executable, '-e', code], { mode: 'workspace-write', workspaceRoot: test.root })).argv,
         cwd: test.root, stdio: { stdin: 'ignore', stdout: 'pipe', stderr: { maxBytes: 1024 }, control: 'pipe' }, graceMs: 500,
       })
       const reply = once(handle.control!, 'data')
@@ -215,7 +222,7 @@ describe.skipIf(!enabled)('POSIX SSH runtime acceptance', () => {
     try {
       const code = 'const fs=require(\'node:fs\');require(\'node:child_process\').spawn(process.execPath,[\'-e\',\'setInterval(()=>{},1000)\'],{detached:true,stdio:\'ignore\'}).unref();fs.appendFileSync(\'launches\',\'one\\n\');process.stdout.write(fs.readFileSync(\'/proc/self/cgroup\',\'utf8\'));setInterval(()=>{},1000);'
       const handle = victim.ctx.subprocess.spawn({
-        argv: [victim.hello.node, '-e', code], cwd: victim.root,
+        argv: [victim.hello.executable, '-e', code], cwd: victim.root,
         stdio: { stdin: 'ignore', stdout: 'pipe', stderr: { maxBytes: 4096 } }, graceMs: 500,
       })
       const [bytes] = await once(handle.stdout!, 'data') as [Buffer]
@@ -238,25 +245,24 @@ describe.skipIf(!enabled)('POSIX SSH runtime acceptance', () => {
       await victimConnection.dispose()
       try {
         await processResult(observer.ctx.subprocess.spawn({
-          argv: [observer.hello.node, '-e', 'require("node:fs").rmSync(process.argv[1],{recursive:true,force:true})', victim.root],
+          argv: [observer.hello.executable, '-e', 'require("node:fs").rmSync(process.argv[1],{recursive:true,force:true})', victim.root],
           cwd: observer.root, stdio: { stdin: 'ignore', stdout: { maxBytes: 1024 }, stderr: { maxBytes: 1024 } }, graceMs: 500,
         }))
       } finally { await removeOwned(observer) }
     }
   }, 60_000)
 
-  it.skipIf(bootstrap === undefined)('runs PTC remotely with empty environment, bindings, denial and a bounded hot loop', async () => {
+  it.skipIf(bootstrap === undefined).each(PTC_MODES)('runs $mode PTC remotely with empty environment, bindings, denial and a bounded hot loop', async (mode) => {
     const test = await setup()
-    const fiber = test.ctx.plugin(NodePtcRuntime, {
-      nodeExecutable: test.ctx.ssh.nodeExecutable, bootstrapPath: test.ctx.ssh.bootstrapPath,
-    })
+    const fiber = test.ctx.plugin(NodePtcRuntime, { ...mode.config, launch: test.ctx.ssh.ptcLaunch })
     try {
       await fiber
       const runtime = test.ctx.ptcRuntime
       const bindings = [{ global: 'tools', functions: { echo: async (input: unknown) => String(input) } }]
       const policy: SandboxPolicy = { mode: 'workspace-write', workspaceRoot: test.root }
       const result = await runtime.run(runtime.resolve({
-        program: 'const fs=await import(\'node:fs/promises\');await fs.writeFile(\'ptc.txt\',\'node\');return {where:process.cwd(),env:Object.keys(process.env),echo:await tools.echo(\'host binding\')}',
+        program: 'const fs=await import(\'node:fs/promises\');await fs.writeFile(\'ptc.txt\',\'node\');'
+          + mode.complete('({where:process.cwd(),env:Object.keys(process.env),echo:await tools.echo(\'host binding\')})'),
         bindings, cwd: test.root, sandboxPolicy: policy,
       }))
       expect(result).toMatchObject({ value: { where: test.root, env: [], echo: 'host binding' }, sandbox: { mode: 'workspace-write' } })
@@ -281,7 +287,7 @@ describe.skipIf(!enabled)('POSIX SSH runtime acceptance', () => {
       await test.ctx.fs.writeText(await test.ctx.fs.resolve(`${test.root}/tsconfig.json`), '{"compilerOptions":{"strict":true}}')
       await test.ctx.fs.writeText(await test.ctx.fs.resolve(`${test.root}/source.ts`), 'export const answer: number = 42\nexport const doubled = answer * 2\n')
       stdio = test.ctx.plugin(LspStdio, { servers: { remoteTypescript: {
-        command: test.hello.node, args: [languageServer as string, '--stdio'], extensionToLanguage: { '.ts': 'typescript' },
+        command: test.hello.executable, args: [languageServer as string, '--stdio'], extensionToLanguage: { '.ts': 'typescript' },
       } } })
       await stdio
       const request = { filePath: 'source.ts', workspaceRoot: test.root, position: { line: 1, character: 24 } }

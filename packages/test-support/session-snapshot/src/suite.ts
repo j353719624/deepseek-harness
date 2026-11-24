@@ -401,8 +401,8 @@ function pinningHeaderPayloads(rawLog: string, ctx: NormalizeContext): unknown[]
 }
 
 /**
- * The rendered prompt text of one parsed `system/message` record: its single
- * text block, or `''` when the empty `content` records "no system prompt".
+ * Render one parsed `system/message` with blank lines between its text blocks.
+ * Empty content records no system prompt.
  * Any other record yields `undefined`.
  */
 function systemPromptOf(record: Record<string, unknown>): string | undefined {
@@ -410,8 +410,9 @@ function systemPromptOf(record: Record<string, unknown>): string | undefined {
   const data = record.data as { message?: { content?: unknown } } | undefined
   const content = data?.message?.content
   if (!Array.isArray(content)) return undefined
-  const block = content[0] as { text?: unknown } | undefined
-  return content.length === 0 ? '' : typeof block?.text === 'string' ? block.text : undefined
+  const texts = content.map((block: { text?: unknown }) => block.text)
+  if (!texts.every((text): text is string => typeof text === 'string')) return undefined
+  return texts.map(text => text.trim()).filter(Boolean).join('\n\n')
 }
 
 /** Extract every array-valued tool catalog from a normalized header sequence. */
@@ -419,6 +420,7 @@ function toolSchemasFrom(headers: readonly unknown[]): unknown[][] {
   return headers.flatMap((header) => {
     if (header === null || typeof header !== 'object') return []
     const tools = (header as { tools?: unknown }).tools
+    if (tools === undefined) return [[]]
     return Array.isArray(tools) ? [tools] : []
   })
 }
@@ -473,8 +475,8 @@ export function systemPromptPrecedesRequests(rawLog: string): boolean {
 
 /**
  * The normalized tool-schema arrays carried by request headers in a session
- * JSONL, in log order. Headers without an array-valued tools field are omitted
- * so callers can assert one schema set per header explicitly.
+ * JSONL, in log order. An absent tools field yields an empty schema set;
+ * invalid non-array fields are omitted.
  *
  * @param rawLog The session `.jsonl` content to inspect.
  * @param ctx The volatile values of the run that produced it.
@@ -524,16 +526,24 @@ export function parseToolSchemasSnapshot(snapshot: string): ToolSchemasSnapshot 
 /**
  * Restore one sidecar schema set into a tokenized pinned header.
  *
- * @param header The parsed request header carrying `tools: "{{tools}}"`.
+ * @param header The parsed header with a tools token, matching ordered names, or no tools for an empty sidecar.
  * @param schemas The complete schemas for this full header snapshot.
- * @returns A copy of the header with its complete schemas restored.
+ * @returns A copy with complete schemas restored, or the original header when tools are absent.
  */
 export function restorePinnedToolSchemas(header: unknown, schemas: readonly unknown[]): unknown {
   if (header === null || typeof header !== 'object' || Array.isArray(header)) {
     throw new Error('acp-snapshot: pinned request header must be an object')
   }
-  if ((header as { tools?: unknown }).tools !== TOOLS_TOKEN) {
-    throw new Error(`acp-snapshot: pinned request header tools must equal ${TOOLS_TOKEN}`)
+  const tools = (header as { tools?: unknown }).tools
+  if (tools === undefined && schemas.length === 0) return header
+  const namesMatch = Array.isArray(tools) && tools.length === schemas.length
+    && tools.every((name, index) => {
+      const schema = schemas[index]
+      return typeof name === 'string' && schema !== null && typeof schema === 'object'
+        && 'name' in schema && schema.name === name
+    })
+  if (tools !== TOOLS_TOKEN && !namesMatch) {
+    throw new Error(`acp-snapshot: pinned request header tools must equal ${TOOLS_TOKEN} or the ordered sidecar tool names`)
   }
   return { ...header, tools: schemas }
 }
@@ -646,6 +656,7 @@ function surfaceEventMessage(record: Record<string, unknown>): Record<string, un
       message = data
       break
     case 'system/message':
+    case 'developer/message':
     case 'assistant/message':
     case 'tool/result':
       message = data.message
@@ -762,7 +773,7 @@ export function stabilizeFixtureMessageIds(logs: readonly string[], fixtures: re
 /** One packed row's member times, or `undefined` for an ordinary record. */
 function packedTimes(record: Record<string, unknown>): number[] | undefined {
   if (!PACKED_CHUNK_ROW_TYPES.has(record.type as string)) return undefined
-  const row = record as unknown as { time0?: number; data: { dt: number[] } }
+  const row = record as { time0?: number; data: { dt: number[] } }
   const times = [row.time0 ?? 0]
   for (const gap of row.data.dt) times.push((times[times.length - 1] as number) + gap)
   return times
@@ -837,6 +848,32 @@ export function refreshFixtureReplacements(logs: HarvestedLog[], fixtures: strin
   return replacements
 }
 
+/**
+ * Check raw parent/child clocks before normalization, or preserve their equality during refresh.
+ * @param logs - one scenario's parent and child logs with shared Session ids.
+ * @param policy - validate live output, or align refreshed catalogs to the retained child headers.
+ * @returns logs with only conflicting catalog creation times replaced under preserve-headers.
+ */
+export function reconcileCatalogCreationTimes(logs: readonly string[], policy: 'validate' | 'preserve-headers'): string[] {
+  const headers = new Map(logs.map((log) => {
+    const header = parseJsonlRecords(log)[0]
+    return [header?.['id'], header] as const
+  }))
+  return logs.map(log => log.split('\n').map((line) => {
+    if (line.length === 0) return line
+    const record = JSON.parse(line) as Record<string, unknown>
+    if (record.type !== 'subagent/catalog' || !isRecord(record.data)) return line
+    const child = headers.get(record.data.childId)
+    // Partial harvested corpora need not retain every cataloged child log.
+    if (child === undefined || record.data.childCreatedAt === child.createdAt) return line
+    if (policy === 'validate') {
+      throw new Error(`catalog child ${String(record.data.childId)} creation time ${String(record.data.childCreatedAt)} disagrees with child header ${String(child.createdAt)}`)
+    }
+    record.data.childCreatedAt = child.createdAt
+    return JSON.stringify(record)
+  }).join('\n'))
+}
+
 function preserveFixtureVolatiles(record: Record<string, unknown>, existing: Record<string, unknown> | undefined): void {
   if (existing === undefined || existing.type !== record.type) return
   if (record.type === 'session') {
@@ -864,7 +901,7 @@ function preservePackedMemberTimes(
   existingMembers: Record<string, unknown>[],
 ): void {
   if (!PACKED_CHUNK_ROW_TYPES.has(record.type as string)) return
-  const row = record as unknown as { time0: number; data: { dt: number[] } }
+  const row = record as { time0: number; data: { dt: number[] } }
   const firstTime = existingMembers[0]?.time
   if (!Number.isSafeInteger(firstTime)) return
   row.time0 = firstTime as number
@@ -946,12 +983,12 @@ function preserveNormalizedVolatiles(
   return Object.is(normalizedFresh, normalizedExisting) ? existing : fresh
 }
 
-/** Normalize one aligned record with the same contract used by fixture comparison. */
-function normalizedRefreshRecord(
-  record: Record<string, unknown>,
+/** Normalize the full log so job identities also map references in later records. */
+function normalizedRefreshRecords(
+  records: Record<string, unknown>[],
   context: NormalizeContext,
-): Record<string, unknown> {
-  return JSON.parse(normalizeSessionLog(`${JSON.stringify(record)}\n`, context)) as Record<string, unknown>
+): Record<string, unknown>[] {
+  return parseJsonlRecords(normalizeSessionLog(records.map(record => JSON.stringify(record)).join('\n') + '\n', context))
 }
 
 /**
@@ -1038,8 +1075,8 @@ function normalizedStringMappings(
   records: Record<string, unknown>[],
   freshRecords: Record<string, unknown>[],
   existingRecords: Record<string, unknown>[],
-  freshContext: NormalizeContext,
-  existingContext: NormalizeContext,
+  normalizedFresh: Record<string, unknown>[],
+  normalizedExisting: Record<string, unknown>[],
 ): Map<string, string> | undefined {
   const excludedStrings = new Set<string>()
   for (const record of [...freshRecords, ...existingRecords]) {
@@ -1064,8 +1101,8 @@ function normalizedStringMappings(
       if (!collectNormalizedStringMappings(
         record,
         existingRecord,
-        normalizedRefreshRecord(freshRecords[recordIndex] as Record<string, unknown>, freshContext),
-        normalizedRefreshRecord(existingRecord, existingContext),
+        normalizedFresh[recordIndex],
+        normalizedExisting[existingIndex],
         excludedStrings,
         forward,
         reverse,
@@ -1105,12 +1142,14 @@ export function stabilizeRefreshLog(
   const existingRecords = logicalRecords(parseJsonlRecords(existing))
   const records = parseJsonlRecords(stable)
   const existingContext = fixtureContext(existing)
+  const normalizedFresh = normalizedRefreshRecords(freshRecords, freshContext)
+  const normalizedExisting = normalizedRefreshRecords(existingRecords, existingContext)
   const stringMappings = normalizedStringMappings(
     records,
     freshRecords,
     existingRecords,
-    freshContext,
-    existingContext,
+    normalizedFresh,
+    normalizedExisting,
   )
   let existingIndex = 0
   let previousEventTime: unknown
@@ -1133,8 +1172,8 @@ export function stabilizeRefreshLog(
         record = preserveNormalizedVolatiles(
           record,
           existingRecord,
-          normalizedRefreshRecord(freshRecords[i] as Record<string, unknown>, freshContext),
-          normalizedRefreshRecord(existingRecord, existingContext),
+          normalizedFresh[i],
+          normalizedExisting[existingIndex],
           stringMappings,
         ) as Record<string, unknown>
         records[i] = record
@@ -1308,6 +1347,7 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
           ...scenario.configPath !== undefined ? { configPath: scenario.configPath } : {},
         })
 
+        reconcileCatalogCreationTimes(result.sessionLogs.map(log => log.content), 'validate')
         for (const log of result.sessionLogs) {
           expect(unknownToolCallIds(log.content), `session ${log.id}: snapshot scenarios must not accept UNKNOWN_TOOL`)
             .toEqual([])
@@ -1361,7 +1401,9 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
               ctx,
             ))))
             : result.sessionLogs.map(log => scrubSessionSnapshot(portableFixture(log.content)))
-          const outputFixtures = redactSessionSnapshotIds(stabilizeFixtureMessageIds(freshFixtures, existingFixtures))
+          const outputFixtures = redactSessionSnapshotIds(stabilizeFixtureMessageIds(
+            reconcileCatalogCreationTimes(freshFixtures, 'preserve-headers'), existingFixtures,
+          ))
           await Promise.all(outputFixtures.map((fixture, index) =>
             writeFile(join(dir, outputFixtureFiles[index] as string), fixture)))
           fixtureFiles = outputFixtureFiles
@@ -1439,8 +1481,8 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
             sessionIds: fixtureContexts.flatMap(context => context.sessionIds),
             cwd: (fixtureContexts[0] as NormalizeContext).cwd,
           }
-          const actualSnapshots = normalizeSessionSnapshots(harvested, ctx)
-          const expectedSnapshots = normalizeSessionSnapshots(fixtures, fixtureCtx)
+          const actualSnapshots = normalizeSessionSnapshots(harvested, ctx, { nativeWriterOutput: true })
+          const expectedSnapshots = normalizeSessionSnapshots(fixtures, fixtureCtx, { nativeWriterOutput: true })
           for (const [index, actual] of actualSnapshots.entries()) {
             expect(actual, `${fixtureFiles[index]} mismatch`).toEqual(expectedSnapshots[index])
           }

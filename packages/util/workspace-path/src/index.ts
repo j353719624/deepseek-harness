@@ -21,7 +21,7 @@ export function isAbsoluteWorkspacePath(path: string): boolean {
 /**
  * Resolve a Workspace-relative path into the Host-facing spelling used by path operations.
  * @param cwd - Session Workspace root, when known.
- * @param path - Absolute or Workspace-relative path.
+ * @param path - Absolute or Workspace-relative path; leading `./` segments are dropped when joining.
  * @returns an absolute path when a Workspace root is available, otherwise the original path.
  */
 export function resolveWorkspacePath(cwd: string | undefined, path: string): string {
@@ -29,7 +29,7 @@ export function resolveWorkspacePath(cwd: string | undefined, path: string): str
   if (cwd === undefined || cwd === '') return path
   const separator = isWindowsStylePath(cwd) && cwd.includes('\\') ? '\\' : '/'
   const base = cwd.replace(/[/\\]+$/, '')
-  const relative = path.replace(/^[/\\]+/, '')
+  const relative = path.replace(/^(?:\.?[/\\])+/, '')
   return `${base}${separator}${relative}`
 }
 
@@ -80,22 +80,18 @@ export function pathPartsOf(path: string): { readonly directory: string; readonl
 export * from './file-address.ts'
 
 /**
- * The address for a path as a caller holds it: a relative path, or an absolute
- * path inside the Session's workspace, becomes a `session`-scoped address; an
- * absolute path outside it, or one whose workspace root is unknown, keeps its
- * absolute path in that Session's address.
+ * The address of a file as a caller holds its path. The address carries the
+ * absolute path whenever one is known, so it names the same file after the
+ * Session's directory moves: an absolute path is kept, and a relative path is
+ * joined to `cwd`. A relative path without `cwd` stays relative, and the Host
+ * resolves it against the Session's directory at each read.
  * @param sessionId - the Session the path is read in.
- * @param cwd - that Session's workspace root, when known.
- * @param path - absolute or workspace-relative path, in either separator spelling.
- * @returns the `dsh-resource://file/…` address.
+ * @param cwd - the directory that Session works in, when known.
+ * @param path - absolute path or path relative to `cwd`, in either separator spelling.
+ * @returns the `dsh-resource://file/session/…` address.
  */
 export function fileAddressFor(sessionId: string, cwd: string | undefined, path: string): string {
-  const normalized = path.replace(/\\/g, '/')
-  if (!isAbsoluteWorkspacePath(normalized)) return sessionFileAddress(sessionId, normalized)
-  const root = cwd === undefined ? '' : cwd.replace(/\\/g, '/').replace(/\/+$/, '')
-  if (root !== '' && normalized === root) return sessionFileAddress(sessionId, '')
-  if (root !== '' && normalized.startsWith(`${root}/`)) return sessionFileAddress(sessionId, normalized.slice(root.length + 1))
-  return sessionFileAddress(sessionId, normalized)
+  return sessionFileAddress(sessionId, resolveWorkspacePath(cwd, path))
 }
 
 /**
@@ -109,4 +105,16 @@ export function relativizeToCwd(text: string, cwd: string | undefined): string {
   const root = cwd.replace(/[/\\]+$/, '')
   if (text.startsWith(`${root}/`) || text.startsWith(`${root}\\`)) return text.slice(root.length + 1)
   return text
+}
+
+/**
+ * Address a decoded absolute file path through the authenticated file route.
+ * @param base - HTTP(S) application base, including its deployment prefix, or `dsh-app://app/`.
+ * @param path - Native file path; URL escapes in authored Markdown must already be decoded.
+ * @returns File URL, or undefined for unsupported transports and non-absolute paths.
+ */
+export function fileMediaUrl(base: string, path: string): string | undefined {
+  if ((!/^https?:/u.test(base) && !base.startsWith('dsh-app://app/')) || !isAbsoluteWorkspacePath(path)
+    || /^[/\\]{2}/u.test(path) || /[\u0000-\u001f\u007f]/u.test(path)) return undefined
+  return new URL(`api/file?path=${encodeURIComponent(path)}`, base).href
 }
