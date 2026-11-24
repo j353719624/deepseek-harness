@@ -1,0 +1,62 @@
+# i18n patch — DSH Desktop 0.2.2-rc.5 (Linux), shell menu localization
+#
+# Target  : /opt/dsh-desktop/resources/app/lib/main.js   (Electron main process bundle, ESM)
+# Original: sha256 cd189e94183e57db75726bcc849f345a40cf8058389ef6c90d15c1a9aa1e81fe
+# Patched : sha256 ace74007b331b1df62d1e8726bc28e1597a24374bf195e128acc732c04bcca8c
+#
+# What it fixes (all user-visible on Linux/zh-CN):
+#   1. Edit menu label + items  ->  "Edit/Undo/Redo/Cut/Copy/Paste/Delete/Select All"
+#      came from Electron's hardcoded English role labels ({ role: "editMenu" }).
+#   2. "Quit" item inside the "应用" menu had no explicit label off Windows/macOS.
+#   3. Text-editing right-click menu labels were localized on win32 only.
+#
+# Apply  (app must be closed):  sudo patch -p1 -d / < i18n.patch
+# Revert                      :  sudo patch -R -p1 -d / < i18n.patch
+# Dry run                     :  patch -p1 --dry-run -d / < i18n.patch
+--- a/opt/dsh-desktop/resources/app/lib/main.js	2026-11-24 19:21:34.134234507 +0800
++++ b/opt/dsh-desktop/resources/app/lib/main.js	2026-11-24 19:21:34.140234505 +0800
+@@ -20393,7 +20393,7 @@
+ 			const messages = currentDesktopLocale().messages;
+ 			Menu.buildFromTemplate(items.map((item) => ({
+ 				...item,
+-				...process.platform === "win32" && item.role !== void 0 && item.role in messages ? { label: messages[item.role] } : {},
++				...item.role !== void 0 && item.role in messages ? { label: messages[item.role] } : {},
+ 				accelerator: ""
+ 			}))).popup({ window });
+ 		}
+@@ -21344,11 +21344,25 @@
+ 			}
+ 		]
+ 	});
++	const localizedEditMenu = (messages) => ({
++		label: messages.edit,
++		submenu: [
++			{ role: "undo", label: messages.undo },
++			{ role: "redo", label: messages.redo },
++			{ type: "separator" },
++			{ role: "cut", label: messages.cut },
++			{ role: "copy", label: messages.copy },
++			{ role: "paste", label: messages.paste },
++			{ role: "delete", label: messages.delete },
++			{ type: "separator" },
++			{ role: "selectAll", label: messages.selectAll }
++		]
++	});
+ 	const platformMenus = () => darwin ? [
+ 		shortcuts.fileMenu(currentDesktopLocale().messages),
+ 		macEditMenu(currentDesktopLocale().messages),
+ 		{ role: "windowMenu" }
+-	] : [{ role: "editMenu" }];
++	] : [localizedEditMenu(currentDesktopLocale().messages)];
+ 	const hideCommands = darwin ? [
+ 		{
+ 			role: "hide",
+@@ -21409,7 +21423,7 @@
+ 		...hideCommands,
+ 		{
+ 			role: "quit",
+-			...darwin ? { label: currentDesktopLocale().messages.quitApplication } : process.platform === "win32" ? { label: currentDesktopLocale().messages.exitApplication } : {}
++			...darwin ? { label: currentDesktopLocale().messages.quitApplication } : process.platform === "win32" ? { label: currentDesktopLocale().messages.exitApplication } : { label: currentDesktopLocale().messages.quit }
+ 		}
+ 	];
+ 	const devToolsF12Shortcut = {

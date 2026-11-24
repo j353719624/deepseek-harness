@@ -1,0 +1,4 @@
+provider: github
+owner: j353719624
+repo: deepseek-harness
+updaterCacheDirName: dsh-desktop-updater

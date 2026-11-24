@@ -1,0 +1,118 @@
+# update-check.patch — DSH Desktop 0.2.2-rc.5 (Linux) 更新检查修复
+#
+# 症状: 设置/侧栏出现「重试更新」，点击或菜单「检查更新…」后提示
+#       「检查更新失败，请稍后重试。」(英文 "Could not check for updates. Please try again later.")
+# 根因: 该安装没有打包 app-update.yml（更新源清单），DesktopUpdateCoordinator
+#       的 enabled 谓词恒为 false，doCheck() 在发起任何网络请求之前就抛错。
+#       详见 /home/Yuan/build/notes/update-check.md
+#
+# 目标文件: /opt/dsh-desktop/resources/app/lib/main.js
+#           (Electron 主进程；root 所有，普通用户不可写)
+#
+# 本补丁含两组互相独立的改动:
+#   [A] A1 + A2  让 userData 下的 app-update.yml 成为可用更新源
+#                (有真实/内部 feed 时用它, 之后「检查更新」才真的能查到更新)
+#   [B] B1 + B2  没有 feed 时优雅降级: 不再报错, 并隐藏菜单入口
+#                (不在 /opt 写入 feed 也能只应用 B; 与 A 可同时应用)
+#
+# 手工等价改法 (补齐 4 处, 行号为 0.2.2-rc.5 原文件行号):
+#   H1 main.js:14772  原串: enabled = () => app.isPackaged && existsSync(join(process.resourcesPath, "app-update.yml"))
+#      替换为:          enabled = () => app.isPackaged && (existsSync(join(process.resourcesPath, "app-update.yml")) || existsSync(join(app.getPath("userData"), "app-update.yml")))
+#   H2 main.js:14787  在 '		this.updater.autoDownload = false;' 之前插入两行:
+#      		const userUpdateConfig = join(app.getPath("userData"), "app-update.yml");
+#      		if (updater === autoUpdater && !existsSync(join(process.resourcesPath, "app-update.yml")) && existsSync(userUpdateConfig)) this.updater.updateConfigPath = userUpdateConfig;
+#   H3 main.js:15013  原串: if (!this.enabled()) throw new Error("desktop update: this application has no packaged update source");
+#      替换为:          if (!this.enabled()) return this.setState({ phase: "idle" });
+#   H4 main.js:21380-21385  把菜单项 { label: checkUpdatesMenu, click: openUpdatePrompt(true) }
+#      用 ...(updates.enabled() ? [ ...同内容... ] : []) 包起来 (见下方 diff)
+#      (节前言缩进均为 TAB)
+#
+# 应用方式 (推荐, 需要 root — /opt 只读):
+#   sudo cp -a /opt/dsh-desktop/resources/app/lib/main.js \
+#           /opt/dsh-desktop/resources/app/lib/main.js.bak-0.2.2-rc.5
+#   sudo patch -p1 -d /opt/dsh-desktop/resources/app < /home/Yuan/build/patches/update-check.patch
+#   # 退出并重启 DSH Desktop; 之后 lib/main.js 被覆盖升级时需重新打补丁
+#
+# 不想动 /opt 的替代方式 (普通用户可做, 但有沙箱前提):
+#   cp -a /opt/dsh-desktop /home/Yuan/dsh-desktop-patched
+#   patch -p1 -d /home/Yuan/dsh-desktop-patched/resources/app < /home/Yuan/build/patches/update-check.patch
+#   # 先退出正在运行的实例, 再启动副本:
+#   ELECTRON_DISABLE_SANDBOX=1 /home/Yuan/dsh-desktop-patched/dsh-desktop
+#   # (cp -a 无法保留 chrome-sandbox 的 root setuid 位, 所以需要禁用沙箱;
+#   #  单实例锁以 userData 为键, 原实例仍在运行时副本只会聚焦原窗口)
+#
+# 回滚: sudo cp -a .../lib/main.js.bak-0.2.2-rc.5 .../lib/main.js
+#
+# 应用 A 组改动后还需要一个真实 feed 才算"能查到更新":
+#   文件: ~/.config/@deepseek-ai/dsh-desktop/app-update.yml
+#   内容 (generic provider 示例, 主机与路径按实际发布源填写):
+#     provider: generic
+#     url: https://<feed-host>/desktop/nightly/linux-x64
+#     channel: nightly
+#     updaterCacheDirName: dsh-desktop-updater
+#   electron-updater 会请求 <url>/nightly-linux.yml (stable 渠道为 stable-linux.yml),
+#   清单里需含 version / files[].url / files[].sha512 / path / sha512。
+#   注意: 本机 bin 内与官方文档中都没有公开的 feed 主机名, 该 URL 必须由发布方提供。
+#
+# 本安装的额外限制 (重要, 决定 A 组能做到哪一步):
+#   electron-updater 6.8.9 在 Linux 上用 AppImageUpdater (out/main.js:50-51);
+#   out/AppImageUpdater.js:17-25 的 isUpdaterActive() 在 $APPIMAGE 未定义且
+#   forceDevUpdateConfig 为 false 时返回 false, 于是 AppUpdater.js:253-256 的
+#   checkForUpdates() 直接 return null —— 而 main.js:15016 对 null 结果抛
+#   "desktop update: no check result was returned", UI 仍然是同一句报错。
+#   本安装没有 resources/package-type, 也没有 $APPIMAGE, 所以属于这种情况。
+#   · 只想让「检查更新」能查到版本号 (下载/安装仍不可用, 不要对用户承诺):
+#       在 A2 的两行之后再加一行
+#         			if (this.enabled()) this.updater.forceDevUpdateConfig = true;
+#   · 要真正完成下载+安装: 桌面端必须重新打成 AppImage 或 deb/rpm 包, 并发布 feed。
+#
+
+--- a/lib/main.js
++++ b/lib/main.js
+@@ -14769,7 +14769,7 @@
+ 	* @param discard - Clears settled library targets and platform resources before another channel is used.
+ 	* @param downloadResult - Once per completed download attempt, including platform preparation failures.
+ 	*/
+-	constructor(publish, beforeRestart, updater = autoUpdater, enabled = () => app.isPackaged && existsSync(join(process.resourcesPath, "app-update.yml")), currentVersion = () => app.getVersion(), downloadResult, channel = "nightly", discard = discardDesktopUpdate) {
++	constructor(publish, beforeRestart, updater = autoUpdater, enabled = () => app.isPackaged && (existsSync(join(process.resourcesPath, "app-update.yml")) || existsSync(join(app.getPath("userData"), "app-update.yml"))), currentVersion = () => app.getVersion(), downloadResult, channel = "nightly", discard = discardDesktopUpdate) {
+ 		this.publish = publish;
+ 		this.beforeRestart = beforeRestart;
+ 		this.updater = updater;
+@@ -14784,6 +14784,8 @@
+ 				updater.emit("login", authInfo, callback);
+ 			});
+ 		}
++		const userUpdateConfig = join(app.getPath("userData"), "app-update.yml");
++		if (updater === autoUpdater && !existsSync(join(process.resourcesPath, "app-update.yml")) && existsSync(userUpdateConfig)) this.updater.updateConfigPath = userUpdateConfig;
+ 		this.updater.autoDownload = false;
+ 		this.updater.autoInstallOnAppQuit = false;
+ 		selectUpdateChannel(this.updater, channel);
+@@ -15010,7 +15012,7 @@
+ 		const generation = this.generation;
+ 		try {
+ 			this.assertLive();
+-			if (!this.enabled()) throw new Error("desktop update: this application has no packaged update source");
++			if (!this.enabled()) return this.setState({ phase: "idle" });
+ 			const result = await this.updater.checkForUpdates();
+ 			if (generation !== this.generation || this.disposed) return this.current;
+ 			if (result === null) throw new Error("desktop update: no check result was returned");
+@@ -21377,12 +21379,13 @@
+ 			role: "about"
+ 		},
+ 		{ type: "separator" },
+-		{
+-			label: currentDesktopLocale().messages.checkUpdatesMenu,
+-			click: () => {
+-				openUpdatePrompt(true);
+-			}
+-		},
++		...(updates.enabled() ? [{
++				label: currentDesktopLocale().messages.checkUpdatesMenu,
++				click: () => {
++					openUpdatePrompt(true);
++				}
++			},
++		] : []),
+ 		...process.platform === "darwin" || process.platform === "win32" ? [{
+ 			label: currentDesktopLocale().messages.cliCommandMenu,
+ 			click: () => {
